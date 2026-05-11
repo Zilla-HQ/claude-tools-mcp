@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/url"
@@ -100,13 +101,16 @@ func CommitWorkspace(ctx context.Context, req *sdk.CallToolRequest, args CommitW
 }
 
 func commitWorkspaceResult(output *CommitWorkspaceOutput) (*sdk.CallToolResult, any, error) {
-	text := fmt.Sprintf("commit_sha=%s pushed=%v dist_synced_files=%d errors=%d",
-		output.CommitSHA, output.Pushed, output.DistSyncedFiles, len(output.Errors))
-	if len(output.Errors) > 0 {
-		text += "\nerrors:\n  " + strings.Join(output.Errors, "\n  ")
+	// Platform-side commitSandbox in zilla calls JSON.parse on the Text body
+	// and routes on errors[] + commit_sha. Serialize as JSON, not key=value
+	// (the prior printf-style format caused "non-JSON" parse failures even
+	// when the commit + push succeeded — see zilla INC-261 cold-boot validation).
+	jsonBytes, err := json.Marshal(output)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal commit_workspace output: %w", err)
 	}
 	return &sdk.CallToolResult{
-		Content:           []sdk.Content{&sdk.TextContent{Text: text}},
+		Content:           []sdk.Content{&sdk.TextContent{Text: string(jsonBytes)}},
 		StructuredContent: output,
 	}, output, nil
 }
