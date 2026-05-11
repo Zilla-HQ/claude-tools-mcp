@@ -80,6 +80,22 @@ func runServer(cmd *cobra.Command, args []string) error {
 	mcp.AddTool(mcpServer, &tools.GlobTool, tools.Glob)
 	mcp.AddTool(mcpServer, &tools.GrepTool, tools.Grep)
 
+	// INC-269: raw_read, R2 asset/doc/userdata, commit_workspace
+	mcp.AddTool(mcpServer, &tools.RawReadTool, tools.RawRead)
+	mcp.AddTool(mcpServer, &tools.ReadAssetTool, tools.ReadAsset)
+	mcp.AddTool(mcpServer, &tools.WriteAssetTool, tools.WriteAsset)
+	mcp.AddTool(mcpServer, &tools.ListAssetsTool, tools.ListAssets)
+	mcp.AddTool(mcpServer, &tools.DeleteAssetTool, tools.DeleteAsset)
+	mcp.AddTool(mcpServer, &tools.ReadDocTool, tools.ReadDoc)
+	mcp.AddTool(mcpServer, &tools.WriteDocTool, tools.WriteDoc)
+	mcp.AddTool(mcpServer, &tools.ListDocsTool, tools.ListDocs)
+	mcp.AddTool(mcpServer, &tools.DeleteDocTool, tools.DeleteDoc)
+	mcp.AddTool(mcpServer, &tools.ReadUserdataTool, tools.ReadUserdata)
+	mcp.AddTool(mcpServer, &tools.WriteUserdataTool, tools.WriteUserdata)
+	mcp.AddTool(mcpServer, &tools.ListUserdataTool, tools.ListUserdata)
+	mcp.AddTool(mcpServer, &tools.DeleteUserdataTool, tools.DeleteUserdata)
+	mcp.AddTool(mcpServer, &tools.CommitWorkspaceTool, tools.CommitWorkspace)
+
 	// Stateless mode allows each HTTP request to be handled independently without
 	// session state, enabling horizontal scaling and simpler request handling.
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
