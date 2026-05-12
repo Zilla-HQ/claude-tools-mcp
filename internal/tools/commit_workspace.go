@@ -27,6 +27,11 @@ var CommitWorkspaceTool = sdk.Tool{
 type CommitWorkspaceInput struct {
 	Message  string `json:"message,omitempty" jsonschema:"Optional git commit message"`
 	SyncDist bool   `json:"sync_dist,omitempty" jsonschema:"If true, sync sites/main/dist/ to R2 sites bucket after commit"`
+	// Optional fresh GitHub installation token used for the push. Overrides
+	// the ZILLA_GH_REPO_TOKEN env var (which is set at sandbox boot and
+	// expires after 1h). The platform-side commitSandbox mints a new token
+	// per call and passes it here so long-idle sandboxes can still push.
+	GhToken string `json:"gh_token,omitempty" jsonschema:"Optional override for the GitHub installation token used to authenticate the push. When omitted falls back to ZILLA_GH_REPO_TOKEN env."`
 }
 
 type CommitWorkspaceOutput struct {
@@ -77,7 +82,7 @@ func CommitWorkspace(ctx context.Context, req *sdk.CallToolRequest, args CommitW
 	}
 
 	// ── push ─────────────────────────────────────────────────────────────────
-	pushURL, err := buildAuthenticatedPushURL(workspace)
+	pushURL, err := buildAuthenticatedPushURL(workspace, args.GhToken)
 	if err != nil {
 		output.Errors = append(output.Errors, fmt.Sprintf("build push URL: %v", err))
 		return commitWorkspaceResult(output)
@@ -140,9 +145,16 @@ func runGitOutput(ctx context.Context, dir string, args ...string) (string, erro
 	return stdout.String(), nil
 }
 
-// buildAuthenticatedPushURL injects ZILLA_GH_REPO_TOKEN into the remote URL for push auth.
-func buildAuthenticatedPushURL(workspaceDir string) (string, error) {
-	token := os.Getenv("ZILLA_GH_REPO_TOKEN")
+// buildAuthenticatedPushURL injects an installation token into the remote URL
+// for push auth. The override argument wins when non-empty — used by the
+// platform-side commitSandbox to pass a freshly-minted token, since the
+// env-supplied ZILLA_GH_REPO_TOKEN is set at sandbox boot and expires after 1h
+// (long-idle sandboxes can't push with the stale env token).
+func buildAuthenticatedPushURL(workspaceDir string, override string) (string, error) {
+	token := override
+	if token == "" {
+		token = os.Getenv("ZILLA_GH_REPO_TOKEN")
+	}
 	repoURL := os.Getenv("ZILLA_GH_REPO_URL")
 	if repoURL == "" {
 		// Fall back to configured remote origin.
