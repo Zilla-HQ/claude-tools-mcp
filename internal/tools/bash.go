@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -79,9 +80,29 @@ func (s *State) executeBashCommand(ctx context.Context, command, description str
 }
 
 func (s *State) executeForeground(ctx context.Context, cmd *exec.Cmd, command string) (string, error) {
-	output, err := cmd.CombinedOutput()
+	// Tee stdout/stderr to two sinks:
+	//   1. A buffer that becomes the tool-call response body (today's behavior).
+	//   2. A line-prefixed stderr writer so each output line shows up live in
+	//      the sandbox container logs as `[bash] …`. Without this, a long-
+	//      running bash (e.g. `bun install && next build`) emits nothing
+	//      until it finishes and the caller has no way to see progress.
+	start := time.Now()
+	log.Printf("[bash] start: %s", truncateForLog(command, 200))
+
+	var buf bytes.Buffer
+	lineLogger := newLinePrefixWriter("[bash] ", os.Stderr)
+	combined := io.MultiWriter(&buf, lineLogger)
+	cmd.Stdout = combined
+	cmd.Stderr = combined
+
+	err := cmd.Run()
+	// Flush any unterminated trailing line so it's not dropped on the floor.
+	lineLogger.Flush()
+	elapsed := time.Since(start).Round(time.Millisecond)
+	output := buf.Bytes()
 	if err != nil {
 		if strings.Contains(err.Error(), "context deadline exceeded") {
+			log.Printf("[bash] timed out after %s", elapsed)
 			return "", fmt.Errorf("Command timed out. Consider increasing the timeout parameter or running in background.")
 		}
 
@@ -90,9 +111,11 @@ func (s *State) executeForeground(ctx context.Context, cmd *exec.Cmd, command st
 			// On Unix/Linux, a killed process (e.g., by timeout signal) returns exit code -1
 			// rather than the actual signal number. Detect this to provide clearer error messaging.
 			if exitCode == -1 && strings.Contains(err.Error(), "signal: killed") {
+				log.Printf("[bash] killed after %s (likely timeout)", elapsed)
 				return "", fmt.Errorf("Command timed out. Consider increasing the timeout parameter or running in background.")
 			}
 
+			log.Printf("[bash] exit=%d in %s (%dB output)", exitCode, elapsed, len(output))
 			return "", fmt.Errorf(
 				"Command exited with code %d:\n%s\n\nCommand: %s",
 				exitCode,
@@ -101,9 +124,11 @@ func (s *State) executeForeground(ctx context.Context, cmd *exec.Cmd, command st
 			)
 		}
 
+		log.Printf("[bash] failed after %s: %v", elapsed, err)
 		return "", fmt.Errorf("Failed to execute command: %s\n\nCommand: %s", err, command)
 	}
 
+	log.Printf("[bash] exit=0 in %s (%dB output)", elapsed, len(output))
 	result := string(output)
 	if err := checkOutputSize(ctx, result, "bash"); err != nil {
 		return "", err
@@ -195,6 +220,61 @@ type BashInput struct {
 
 type BashResult struct {
 	Result string `json:"result"`
+}
+
+// linePrefixWriter buffers partial lines and flushes each newline-terminated
+// chunk to the underlying writer with a fixed prefix. The bash subprocess
+// emits output in arbitrary chunks (often partial lines), and we want each
+// fly-logs line to be readable rather than `[bash] partial[bash] rest`.
+type linePrefixWriter struct {
+	mu     sync.Mutex
+	prefix string
+	out    io.Writer
+	buf    bytes.Buffer
+}
+
+func newLinePrefixWriter(prefix string, out io.Writer) *linePrefixWriter {
+	return &linePrefixWriter{prefix: prefix, out: out}
+}
+
+func (w *linePrefixWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n := len(p)
+	w.buf.Write(p)
+	for {
+		data := w.buf.Bytes()
+		idx := bytes.IndexByte(data, '\n')
+		if idx < 0 {
+			break
+		}
+		line := data[:idx]
+		fmt.Fprintf(w.out, "%s%s\n", w.prefix, line)
+		w.buf.Next(idx + 1)
+	}
+	return n, nil
+}
+
+// Flush emits any buffered unterminated line. Call after the subprocess
+// completes so a trailing line without a newline still reaches the logs.
+func (w *linePrefixWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.buf.Len() == 0 {
+		return
+	}
+	fmt.Fprintf(w.out, "%s%s\n", w.prefix, w.buf.Bytes())
+	w.buf.Reset()
+}
+
+// truncateForLog shortens a string for log-line emission, replacing line
+// breaks with spaces so a multi-line bash command stays one log entry.
+func truncateForLog(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
 }
 
 func Bash(ctx context.Context, req *sdk.CallToolRequest, args BashInput) (*sdk.CallToolResult, any, error) {

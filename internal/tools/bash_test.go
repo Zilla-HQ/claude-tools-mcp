@@ -317,3 +317,53 @@ func TestBash_EdgeCases(t *testing.T) {
 		assert.Contains(t, result, "line3")
 	})
 }
+
+func TestLinePrefixWriter(t *testing.T) {
+	t.Run("emits each newline-terminated chunk with prefix", func(t *testing.T) {
+		var sink strings.Builder
+		w := newLinePrefixWriter("[bash] ", &sink)
+		_, _ = w.Write([]byte("hello\nworld\n"))
+		assert.Equal(t, "[bash] hello\n[bash] world\n", sink.String())
+	})
+
+	t.Run("buffers a partial line until newline arrives", func(t *testing.T) {
+		var sink strings.Builder
+		w := newLinePrefixWriter("[bash] ", &sink)
+		_, _ = w.Write([]byte("partia"))
+		assert.Equal(t, "", sink.String(), "partial line should not flush")
+		_, _ = w.Write([]byte("l line\nfull line\n"))
+		assert.Equal(t, "[bash] partial line\n[bash] full line\n", sink.String())
+	})
+
+	t.Run("Flush emits trailing line without newline", func(t *testing.T) {
+		var sink strings.Builder
+		w := newLinePrefixWriter("[bash] ", &sink)
+		_, _ = w.Write([]byte("no trailing newline"))
+		w.Flush()
+		assert.Equal(t, "[bash] no trailing newline\n", sink.String())
+	})
+
+	t.Run("Flush is a no-op when buffer is empty", func(t *testing.T) {
+		var sink strings.Builder
+		w := newLinePrefixWriter("[bash] ", &sink)
+		_, _ = w.Write([]byte("clean\n"))
+		w.Flush()
+		w.Flush()
+		assert.Equal(t, "[bash] clean\n", sink.String())
+	})
+}
+
+func TestTruncateForLog(t *testing.T) {
+	t.Run("returns short input unchanged", func(t *testing.T) {
+		assert.Equal(t, "echo hi", truncateForLog("echo hi", 200))
+	})
+
+	t.Run("flattens newlines to spaces", func(t *testing.T) {
+		assert.Equal(t, "a b c", truncateForLog("a\nb\nc", 200))
+	})
+
+	t.Run("truncates and appends ellipsis past max", func(t *testing.T) {
+		got := truncateForLog("abcdefghij", 5)
+		assert.Equal(t, "abcde…", got)
+	})
+}
