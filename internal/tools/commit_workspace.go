@@ -21,12 +21,12 @@ import (
 
 var CommitWorkspaceTool = sdk.Tool{
 	Name:        "commit_workspace",
-	Description: "Stages all changes in /workspace, commits if non-empty, and pushes to origin HEAD:main. With sync_dist=true, also syncs sites/main/dist/ to R2 sites bucket (excluding uploads/, with --delete semantics). Idempotent: empty diffs are no-ops.",
+	Description: "Stages all changes in /workspace, commits if non-empty, and pushes to origin HEAD:main. With sync_dist=true, also syncs dist/ to R2 sites bucket (excluding uploads/, with --delete semantics). Idempotent: empty diffs are no-ops.",
 }
 
 type CommitWorkspaceInput struct {
 	Message  string `json:"message,omitempty" jsonschema:"Optional git commit message"`
-	SyncDist bool   `json:"sync_dist,omitempty" jsonschema:"If true, sync sites/main/dist/ to R2 sites bucket after commit"`
+	SyncDist bool   `json:"sync_dist,omitempty" jsonschema:"If true, sync dist/ to R2 sites bucket after commit"`
 	// Optional fresh GitHub installation token used for the push. Overrides
 	// the ZILLA_GH_REPO_TOKEN env var (which is set at sandbox boot and
 	// expires after 1h). The platform-side commitSandbox mints a new token
@@ -179,7 +179,7 @@ func buildAuthenticatedPushURL(workspaceDir string, override string) (string, er
 	return u.String(), nil
 }
 
-// syncDistToR2 walks sites/main/dist/ and uploads changed files to R2, then deletes
+// syncDistToR2 walks dist/ and uploads changed files to R2, then deletes
 // keys in R2 that no longer exist locally (excluding uploads/*). Returns count and errors.
 func syncDistToR2(ctx context.Context, workspaceDir string) (int, []string) {
 	var errs []string
@@ -198,7 +198,7 @@ func syncDistToR2(ctx context.Context, workspaceDir string) (int, []string) {
 		return 0, []string{fmt.Sprintf("r2Client: %v", err)}
 	}
 
-	distDir := filepath.Join(workspaceDir, "sites", "main", "dist")
+	distDir := filepath.Join(workspaceDir, "dist")
 	if _, err := os.Stat(distDir); os.IsNotExist(err) {
 		return 0, []string{fmt.Sprintf("dist dir does not exist: %s", distDir)}
 	}
