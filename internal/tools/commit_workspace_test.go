@@ -77,9 +77,16 @@ func commitWorkspaceWithDir(ctx context.Context, workspace string, args CommitWo
 		}
 	}
 
-	// Push to origin.
-	if err := runGit(ctx, workspace, "push", "origin", "HEAD:main"); err != nil {
-		output.Errors = append(output.Errors, "git push: "+err.Error())
+	// Push (with rebase-on-rejection retry; see pushWithRebaseRetry).
+	// Tests use the bare-repo path directly as the push URL since
+	// buildAuthenticatedPushURL is env-driven and not exercised here.
+	bareRepoURL, err := runGitOutput(ctx, workspace, "remote", "get-url", "origin")
+	if err != nil {
+		output.Errors = append(output.Errors, "git remote get-url: "+err.Error())
+		return output, nil
+	}
+	if pushErr := pushWithRebaseRetry(ctx, workspace, strings.TrimSpace(bareRepoURL)); pushErr != nil {
+		output.Errors = append(output.Errors, pushErr.Error())
 		return output, nil
 	}
 	output.Pushed = true
@@ -230,6 +237,89 @@ func TestCommitWorkspace_SyncDistDelete(t *testing.T) {
 	_, staleExists := mock.objects["sites-bucket/mysite2/stale.html"]
 	mock.mu.RUnlock()
 	assert.False(t, staleExists, "stale.html should have been deleted")
+}
+
+// TestCommitWorkspace_RebaseOnRejection — the common reaper-wedge case.
+// Remote has commits the sandbox doesn't (e.g. user fixed a workflow file
+// via the GitHub web UI while the sandbox sat idle). pushWithRebaseRetry
+// pulls --rebase, replays local on top, and the retried push succeeds.
+func TestCommitWorkspace_RebaseOnRejection(t *testing.T) {
+	workspaceDir, bareRepoDir := setupGitWorkspace(t)
+	ctx := context.Background()
+
+	// Make a divergent commit on remote via a second clone (no overlap with
+	// what the workspace will commit, so the rebase resolves cleanly).
+	otherClone := filepath.Join(t.TempDir(), "other-clone")
+	require.NoError(t, runGit(ctx, "", "clone", bareRepoDir, otherClone))
+	require.NoError(t, runGit(ctx, otherClone, "config", "user.email", "other@test.com"))
+	require.NoError(t, runGit(ctx, otherClone, "config", "user.name", "Other"))
+	require.NoError(t, os.WriteFile(filepath.Join(otherClone, "remote-only.txt"), []byte("from remote"), 0o644))
+	require.NoError(t, runGit(ctx, otherClone, "add", "-A"))
+	require.NoError(t, runGit(ctx, otherClone, "commit", "-m", "remote-only commit"))
+	require.NoError(t, runGit(ctx, otherClone, "push", "origin", "HEAD:main"))
+
+	// Now make a local change in the workspace.
+	require.NoError(t, os.WriteFile(filepath.Join(workspaceDir, "local-only.txt"), []byte("from sandbox"), 0o644))
+
+	output, err := commitWorkspaceWithDir(ctx, workspaceDir, CommitWorkspaceInput{
+		Message: "feat: local change",
+	})
+	require.NoError(t, err)
+
+	assert.Empty(t, output.Errors)
+	assert.True(t, output.Pushed)
+	assert.NotEmpty(t, output.CommitSHA)
+
+	// After push, both commits exist on remote — verify via another clone.
+	verifyClone := filepath.Join(t.TempDir(), "verify")
+	require.NoError(t, runGit(ctx, "", "clone", bareRepoDir, verifyClone))
+	_, statErr1 := os.Stat(filepath.Join(verifyClone, "remote-only.txt"))
+	_, statErr2 := os.Stat(filepath.Join(verifyClone, "local-only.txt"))
+	assert.NoError(t, statErr1)
+	assert.NoError(t, statErr2)
+}
+
+// TestCommitWorkspace_AbortsOnRebaseConflict — true content conflict.
+// Both sides edited the same file; the rebase can't auto-resolve. We expect
+// the rebase to be aborted (workspace back to a clean state) and the error
+// to surface clearly so the reaper / publish flow doesn't keep retrying.
+func TestCommitWorkspace_AbortsOnRebaseConflict(t *testing.T) {
+	workspaceDir, bareRepoDir := setupGitWorkspace(t)
+	ctx := context.Background()
+
+	// Both clones edit README.md to different content → guaranteed conflict.
+	otherClone := filepath.Join(t.TempDir(), "other-clone")
+	require.NoError(t, runGit(ctx, "", "clone", bareRepoDir, otherClone))
+	require.NoError(t, runGit(ctx, otherClone, "config", "user.email", "other@test.com"))
+	require.NoError(t, runGit(ctx, otherClone, "config", "user.name", "Other"))
+	require.NoError(t, os.WriteFile(filepath.Join(otherClone, "README.md"), []byte("# Remote version\n"), 0o644))
+	require.NoError(t, runGit(ctx, otherClone, "add", "-A"))
+	require.NoError(t, runGit(ctx, otherClone, "commit", "-m", "remote: edit README"))
+	require.NoError(t, runGit(ctx, otherClone, "push", "origin", "HEAD:main"))
+
+	// Local edit to the same file.
+	require.NoError(t, os.WriteFile(filepath.Join(workspaceDir, "README.md"), []byte("# Sandbox version\n"), 0o644))
+
+	output, err := commitWorkspaceWithDir(ctx, workspaceDir, CommitWorkspaceInput{
+		Message: "edit: local README",
+	})
+	require.NoError(t, err)
+
+	assert.False(t, output.Pushed)
+	require.NotEmpty(t, output.Errors)
+	combined := strings.Join(output.Errors, " ")
+	assert.Contains(t, combined, "rejected")
+	assert.Contains(t, combined, "manual reconciliation")
+
+	// Workspace is back to a clean state — rebase was aborted, no `.git/rebase-merge`.
+	_, rebaseStateErr := os.Stat(filepath.Join(workspaceDir, ".git", "rebase-merge"))
+	assert.True(t, os.IsNotExist(rebaseStateErr), "rebase should have been aborted")
+
+	// The local commit still exists in the workspace (it's on the local branch
+	// that was rebased-and-then-aborted; HEAD is back where it was pre-rebase).
+	logOut, err := runGitOutput(ctx, workspaceDir, "log", "--format=%s", "-1")
+	require.NoError(t, err)
+	assert.Contains(t, logOut, "edit: local README")
 }
 
 func TestCommitWorkspace_MCPTool(t *testing.T) {
