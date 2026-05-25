@@ -88,9 +88,8 @@ func CommitWorkspace(ctx context.Context, req *sdk.CallToolRequest, args CommitW
 		return commitWorkspaceResult(output)
 	}
 
-	pushArgs := []string{"push", pushURL, "HEAD:main"}
-	if err := runGit(ctx, workspace, pushArgs...); err != nil {
-		output.Errors = append(output.Errors, fmt.Sprintf("git push: %v", err))
+	if pushErr := pushWithRebaseRetry(ctx, workspace, pushURL); pushErr != nil {
+		output.Errors = append(output.Errors, pushErr.Error())
 		return commitWorkspaceResult(output)
 	}
 	output.Pushed = true
@@ -118,6 +117,53 @@ func commitWorkspaceResult(output *CommitWorkspaceOutput) (*sdk.CallToolResult, 
 		Content:           []sdk.Content{&sdk.TextContent{Text: string(jsonBytes)}},
 		StructuredContent: output,
 	}, output, nil
+}
+
+// pushWithRebaseRetry pushes HEAD to main, integrating remote changes via
+// `pull --rebase` when the initial push is rejected as non-fast-forward.
+//
+// The retry handles the common case where the company repo was edited
+// out-of-band (e.g., the user fixed a workflow file via the GitHub web UI
+// while the sandbox sat idle) — the agent's local commits are clean atop
+// remote and rebase succeeds without intervention.
+//
+// On true content conflicts (both sides edited the same file) the rebase
+// aborts and the function returns a clear error. The caller (the idle
+// reaper or the agent-driven publish flow) should NOT auto-retry — the
+// sandbox is in a state only a human can resolve safely.
+func pushWithRebaseRetry(ctx context.Context, workspace, pushURL string) error {
+	pushArgs := []string{"push", pushURL, "HEAD:main"}
+	pushErr := runGit(ctx, workspace, pushArgs...)
+	if pushErr == nil {
+		return nil
+	}
+
+	// Detect non-fast-forward rejection. git emits "rejected" + "fetch first"
+	// (or "non-fast-forward") in stderr; runGit folds stderr into the
+	// returned error. Anything else is a real failure (auth, network, etc.).
+	errStr := pushErr.Error()
+	if !strings.Contains(errStr, "rejected") && !strings.Contains(errStr, "non-fast-forward") {
+		return fmt.Errorf("git push: %v", pushErr)
+	}
+
+	// Try to integrate remote via rebase. Use the authenticated push URL
+	// directly rather than touching the configured origin remote.
+	rebaseErr := runGit(ctx, workspace, "pull", pushURL, "main", "--rebase", "--no-edit")
+	if rebaseErr != nil {
+		// Likely a content conflict. Abort the rebase so the workspace is
+		// in a clean state for the next attempt or for manual inspection.
+		_ = runGit(ctx, workspace, "rebase", "--abort")
+		return fmt.Errorf(
+			"git push rejected; pull --rebase failed (likely conflict): %v. Sandbox needs manual reconciliation",
+			rebaseErr,
+		)
+	}
+
+	// Retry the push now that local is rebased on top of remote.
+	if pushErr2 := runGit(ctx, workspace, pushArgs...); pushErr2 != nil {
+		return fmt.Errorf("git push (after rebase): %v", pushErr2)
+	}
+	return nil
 }
 
 // runGit runs a git command in the given directory, discarding stdout.
