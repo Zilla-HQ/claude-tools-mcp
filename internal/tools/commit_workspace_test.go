@@ -65,7 +65,8 @@ func commitWorkspaceWithDir(ctx context.Context, workspace string, args CommitWo
 		if msg == "" {
 			msg = "chore: update workspace"
 		}
-		if err := runGit(ctx, workspace, "commit", "-m", msg); err != nil {
+		commitArgs := buildCommitArgs(ctx, args.GhToken, msg)
+		if err := runGit(ctx, workspace, commitArgs...); err != nil {
 			output.Errors = append(output.Errors, "git commit: "+err.Error())
 			return output, nil
 		}
@@ -184,7 +185,7 @@ func TestCommitWorkspace_SyncDist(t *testing.T) {
 
 	// Create a fake dist directory.
 	tmpDir := t.TempDir()
-	distDir := filepath.Join(tmpDir, "sites", "main", "dist")
+	distDir := filepath.Join(tmpDir, "dist")
 	require.NoError(t, os.MkdirAll(distDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(distDir, "index.html"), []byte("<html/>"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(distDir, "style.css"), []byte("body{}"), 0o644))
@@ -224,7 +225,7 @@ func TestCommitWorkspace_SyncDistDelete(t *testing.T) {
 
 	// Dist dir only has index.html (stale.html is absent).
 	tmpDir := t.TempDir()
-	distDir := filepath.Join(tmpDir, "sites", "main", "dist")
+	distDir := filepath.Join(tmpDir, "dist")
 	require.NoError(t, os.MkdirAll(distDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(distDir, "index.html"), []byte("<html/>"), 0o644))
 

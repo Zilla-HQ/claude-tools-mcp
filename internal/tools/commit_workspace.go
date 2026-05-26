@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -67,7 +70,13 @@ func CommitWorkspace(ctx context.Context, req *sdk.CallToolRequest, args CommitW
 		if msg == "" {
 			msg = "chore: update workspace"
 		}
-		if err := runGit(ctx, workspace, "commit", "-m", msg); err != nil {
+		// Resolve the GitHub App bot identity that owns the installation
+		// token so the commit author matches the pusher. Vercel rejects
+		// commits whose author isn't associated with the GitHub App
+		// installation (INC-406). Failure is non-fatal — we fall back to
+		// git's configured user.name/user.email.
+		commitArgs := buildCommitArgs(ctx, args.GhToken, msg)
+		if err := runGit(ctx, workspace, commitArgs...); err != nil {
 			output.Errors = append(output.Errors, fmt.Sprintf("git commit: %v", err))
 			return commitWorkspaceResult(output)
 		}
@@ -191,16 +200,126 @@ func runGitOutput(ctx context.Context, dir string, args ...string) (string, erro
 	return stdout.String(), nil
 }
 
+// buildCommitArgs assembles `git commit` args, prefixed with -c user.name /
+// -c user.email when we can resolve the GitHub App bot identity. The -c
+// flags scope to the single git invocation, so we don't mutate workspace
+// or global git config.
+//
+// If the identity can't be resolved (no token, env not set, API failure),
+// we fall back to whatever the surrounding git config provides — the commit
+// still succeeds, but Vercel may reject the push downstream (INC-406).
+func buildCommitArgs(ctx context.Context, ghToken string, msg string) []string {
+	args := []string{}
+	if name, email, err := resolveBotIdentity(ctx, resolveToken(ghToken)); err == nil {
+		args = append(args, "-c", "user.name="+name, "-c", "user.email="+email)
+	}
+	args = append(args, "commit", "-m", msg)
+	return args
+}
+
+// resolveToken returns the GitHub installation token to use, preferring the
+// per-call override and falling back to the env var set at sandbox boot.
+func resolveToken(override string) string {
+	if override != "" {
+		return override
+	}
+	return os.Getenv("ZILLA_GH_REPO_TOKEN")
+}
+
+// botIdentity holds the GitHub App bot identity that owns an installation token.
+type botIdentity struct {
+	name  string
+	email string
+}
+
+var (
+	botIdentityCache   = map[string]botIdentity{}
+	botIdentityCacheMu sync.Mutex
+
+	// githubAPIBase is the base URL for the GitHub API. Overridable in tests.
+	githubAPIBase = "https://api.github.com"
+
+	// botIdentityHTTPClient is the HTTP client used to resolve the bot
+	// identity. Exposed as a var so tests can swap in a short-timeout client.
+	botIdentityHTTPClient = &http.Client{Timeout: 10 * time.Second}
+)
+
+// resolveBotIdentity returns the GitHub App bot's name + noreply email for
+// the given installation token. The bot identity for a GitHub App is what
+// Vercel (and `git log`, `gh pr view`, etc.) attribute the commit to — it
+// must match the App installation that pushed the commit, or Vercel will
+// reject the push and the project will never deploy (INC-406).
+//
+// Resolution order:
+//  1. ZILLA_GH_BOT_NAME + ZILLA_GH_BOT_EMAIL env vars (platform escape hatch
+//     for environments where the API call is undesirable or for tests).
+//  2. GET /user with the installation token → {login, id}. The standard
+//     noreply email pattern is <id>+<login>@users.noreply.github.com.
+//
+// Returns an error when no token is available or the API call fails;
+// callers fall back to whatever git's user.name/user.email config provides.
+func resolveBotIdentity(ctx context.Context, token string) (string, string, error) {
+	if name, email := os.Getenv("ZILLA_GH_BOT_NAME"), os.Getenv("ZILLA_GH_BOT_EMAIL"); name != "" && email != "" {
+		return name, email, nil
+	}
+	if token == "" {
+		return "", "", fmt.Errorf("no GitHub token available to resolve bot identity")
+	}
+
+	botIdentityCacheMu.Lock()
+	if id, ok := botIdentityCache[token]; ok {
+		botIdentityCacheMu.Unlock()
+		return id.name, id.email, nil
+	}
+	botIdentityCacheMu.Unlock()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", githubAPIBase+"/user", nil)
+	if err != nil {
+		return "", "", fmt.Errorf("build /user request: %w", err)
+	}
+	req.Header.Set("Authorization", "token "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := botIdentityHTTPClient.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("GET /user: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", "", fmt.Errorf("GET /user: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var u struct {
+		Login string `json:"login"`
+		ID    int64  `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&u); err != nil {
+		return "", "", fmt.Errorf("decode /user: %w", err)
+	}
+	if u.Login == "" || u.ID == 0 {
+		return "", "", fmt.Errorf("GET /user returned empty login or id")
+	}
+
+	identity := botIdentity{
+		name:  u.Login,
+		email: fmt.Sprintf("%d+%s@users.noreply.github.com", u.ID, u.Login),
+	}
+
+	botIdentityCacheMu.Lock()
+	botIdentityCache[token] = identity
+	botIdentityCacheMu.Unlock()
+
+	return identity.name, identity.email, nil
+}
+
 // buildAuthenticatedPushURL injects an installation token into the remote URL
 // for push auth. The override argument wins when non-empty — used by the
 // platform-side commitSandbox to pass a freshly-minted token, since the
 // env-supplied ZILLA_GH_REPO_TOKEN is set at sandbox boot and expires after 1h
 // (long-idle sandboxes can't push with the stale env token).
 func buildAuthenticatedPushURL(workspaceDir string, override string) (string, error) {
-	token := override
-	if token == "" {
-		token = os.Getenv("ZILLA_GH_REPO_TOKEN")
-	}
+	token := resolveToken(override)
 	repoURL := os.Getenv("ZILLA_GH_REPO_URL")
 	if repoURL == "" {
 		// Fall back to configured remote origin.
