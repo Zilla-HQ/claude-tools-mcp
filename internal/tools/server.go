@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -24,6 +25,16 @@ type State struct {
 	// shell IDs (e.g., "shell_1", "shell_2"). Must be incremented atomically
 	// when protected by Mu.Lock() to ensure IDs remain globally unique.
 	NextShellID int
+
+	// Jobs maps job IDs to their corresponding Job structs for async tool calls.
+	Jobs map[string]*Job
+
+	// NextJobID is a monotonically increasing counter used to generate unique
+	// job IDs (e.g., "job_1", "job_2"). Protected by Mu.Lock().
+	NextJobID int
+
+	// stopEviction cancels the background eviction goroutine started by NewState.
+	stopEviction func()
 }
 
 // globalState is the singleton instance of State for the entire tools package.
@@ -36,10 +47,35 @@ func init() {
 }
 
 func NewState() *State {
-	return &State{
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &State{
 		ReadFiles:        make(map[string]time.Time),
 		BackgroundShells: make(map[string]*BackgroundShell),
 		NextShellID:      1,
+		Jobs:             make(map[string]*Job),
+		NextJobID:        1,
+		stopEviction:     cancel,
+	}
+	go s.evictLoop(ctx)
+	return s
+}
+
+// StopEviction stops the background eviction goroutine. Call this in tests
+// (via defer) to avoid goroutine leaks.
+func (s *State) StopEviction() {
+	s.stopEviction()
+}
+
+func (s *State) evictLoop(ctx context.Context) {
+	ticker := time.NewTicker(jobEvictTick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.evictOldJobs()
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
