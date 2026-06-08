@@ -21,7 +21,7 @@ func (s *State) executeRead(ctx context.Context, filePath string, offset, limit 
 		return "", err
 	}
 
-	content, err := os.ReadFile(resolved) // lgtm[go/path-injection]
+	content, err := os.ReadFile(resolved)
 	if err != nil {
 		return "", fmt.Errorf("Cannot read file: %s", err)
 	}
@@ -75,7 +75,7 @@ func (s *State) executeRead(ctx context.Context, filePath string, offset, limit 
 }
 
 func validateFileForRead(ctx context.Context, resolved string) (os.FileInfo, error) {
-	fileInfo, err := os.Stat(resolved) // lgtm[go/path-injection]
+	fileInfo, err := os.Stat(resolved)
 	if os.IsNotExist(err) || (err == nil && fileInfo.IsDir()) {
 		return nil, fmt.Errorf("file does not exist")
 	}

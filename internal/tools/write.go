@@ -20,7 +20,7 @@ func (s *State) executeWrite(ctx context.Context, filePath, content string) (str
 	// (1) the file was previously read in this session, or (2) the file is being created new.
 	// Additionally, detect if the file has been modified externally since it was last read,
 	// which would indicate stale state and require a fresh read before proceeding.
-	if fileInfo, err := os.Stat(resolved); err == nil { // lgtm[go/path-injection]
+	if fileInfo, err := os.Stat(resolved); err == nil {
 		s.Mu.RLock()
 		readTime, wasRead := s.ReadFiles[resolved]
 		s.Mu.RUnlock()
@@ -35,9 +35,9 @@ func (s *State) executeWrite(ctx context.Context, filePath, content string) (str
 	}
 
 	// Create parent directories if they don't exist to support writing to nested paths
-	_ = os.MkdirAll(filepath.Dir(resolved), 0o750) // lgtm[go/path-injection]
+	_ = os.MkdirAll(filepath.Dir(resolved), 0o750)
 
-	err = os.WriteFile(resolved, []byte(content), 0o600) // lgtm[go/path-injection]
+	err = os.WriteFile(resolved, []byte(content), 0o600)
 	if err != nil {
 		return "", fmt.Errorf("Cannot write file: %s", err)
 	}
@@ -54,7 +54,7 @@ func (s *State) executeWrite(ctx context.Context, filePath, content string) (str
 	// Update the cached modification time for this file to establish the current state.
 	// This enables future write operations to detect external changes via timestamp comparison.
 	s.Mu.Lock()
-	if fileInfo, err := os.Stat(resolved); err == nil { // lgtm[go/path-injection]
+	if fileInfo, err := os.Stat(resolved); err == nil {
 		s.ReadFiles[resolved] = fileInfo.ModTime()
 	}
 	s.Mu.Unlock()

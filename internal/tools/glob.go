@@ -35,14 +35,14 @@ func (s *State) executeGlob(ctx context.Context, pattern, path string) (string, 
 	}
 
 	// Check if searchDir exists and is accessible
-	if _, err := os.Stat(searchDir); err != nil { // lgtm[go/path-injection]
+	if _, err := os.Stat(searchDir); err != nil {
 		return "No files found", nil
 	}
 
 	var matches []fileInfo
 
 	// Use doublestar for proper glob matching with ** support
-	fsys := os.DirFS(searchDir) // lgtm[go/path-injection]
+	fsys := os.DirFS(searchDir)
 	err := doublestar.GlobWalk(fsys, pattern, func(path string, d fs.DirEntry) error {
 		// Check context cancellation
 		select {
