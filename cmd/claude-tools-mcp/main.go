@@ -51,6 +51,8 @@ func setupHTTPServer(addr string, mcpHandler http.Handler) *http.Server {
 	state := tools.GetState()
 	mux.HandleFunc("POST /tools/call/async", handleAsyncStart(state))
 	mux.HandleFunc("GET /jobs/{jobId}", handleGetJob(state))
+	mux.HandleFunc("POST /jobs/{jobId}/cancel", handleCancelJob(state))
+	mux.HandleFunc("GET /jobs/{jobId}/events", handleGetJobEvents(state))
 	mux.Handle("/", mcpHandler)
 	return &http.Server{
 		Addr:              addr,
@@ -98,6 +100,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	mcp.AddTool(mcpServer, &tools.ListUserdataTool, tools.ListUserdata)
 	mcp.AddTool(mcpServer, &tools.DeleteUserdataTool, tools.DeleteUserdata)
 	mcp.AddTool(mcpServer, &tools.CommitWorkspaceTool, tools.CommitWorkspace)
+	mcp.AddTool(mcpServer, &tools.DevRunAgentTool, tools.DevRunAgent)
 
 	// Stateless mode allows each HTTP request to be handled independently without
 	// session state, enabling horizontal scaling and simpler request handling.

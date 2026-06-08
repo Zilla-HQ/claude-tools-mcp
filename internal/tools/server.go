@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,6 +33,9 @@ type State struct {
 	// NextJobID is a monotonically increasing counter used to generate unique
 	// job IDs (e.g., "job_1", "job_2"). Protected by Mu.Lock().
 	NextJobID int
+
+	// WebhookDrops counts events dropped after exhausting all retry attempts.
+	WebhookDrops atomic.Int64
 
 	// stopEviction cancels the background eviction goroutine started by NewState.
 	stopEviction func()

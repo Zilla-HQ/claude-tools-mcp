@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -23,9 +24,10 @@ type JobSnapshot struct {
 }
 
 const (
-	JobStatusRunning = "running"
-	JobStatusDone    = "done"
-	JobStatusFailed  = "failed"
+	JobStatusRunning   = "running"
+	JobStatusDone      = "done"
+	JobStatusFailed    = "failed"
+	JobStatusCancelled = "cancelled"
 
 	jobEvictAfter = 10 * time.Minute
 	jobEvictTick  = time.Minute
@@ -42,6 +44,8 @@ type Job struct {
 	CreatedAt time.Time
 	Done      chan struct{}
 	cancel    context.CancelFunc
+	Cmd       *exec.Cmd
+	Events    *EventRing
 }
 
 // StartJob creates a Job for the named tool, adds it to s.Jobs, and spawns a
@@ -124,7 +128,7 @@ func (s *State) evictOldJobs() {
 // IsKnownTool reports whether toolName is a supported async tool.
 func IsKnownTool(toolName string) bool {
 	switch toolName {
-	case "bash", "read", "write", "edit", "glob", "grep":
+	case "bash", "read", "write", "edit", "glob", "grep", "dev_run_agent":
 		return true
 	}
 	return false
