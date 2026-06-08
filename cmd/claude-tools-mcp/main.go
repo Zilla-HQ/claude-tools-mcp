@@ -44,10 +44,13 @@ func main() {
 	}
 }
 
-// setupHTTPServer creates an HTTP server with the MCP handler and security timeouts
-// configured to prevent slowloris attacks and resource exhaustion.
+// setupHTTPServer creates an HTTP server with the async and MCP handlers registered,
+// along with security timeouts to prevent slowloris attacks and resource exhaustion.
 func setupHTTPServer(addr string, mcpHandler http.Handler) *http.Server {
 	mux := http.NewServeMux()
+	state := tools.GetState()
+	mux.HandleFunc("POST /tools/call/async", handleAsyncStart(state))
+	mux.HandleFunc("GET /jobs/{jobId}", handleGetJob(state))
 	mux.Handle("/", mcpHandler)
 	return &http.Server{
 		Addr:              addr,
