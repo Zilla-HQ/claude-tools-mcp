@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 
@@ -27,7 +26,8 @@ type jobStatusResponse struct {
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, `{"error":%q}`, msg)
+	b, _ := json.Marshal(map[string]string{"error": msg})
+	w.Write(b) //nolint:errcheck
 }
 
 func handleAsyncStart(state *tools.State) http.HandlerFunc {
@@ -41,6 +41,16 @@ func handleAsyncStart(state *tools.State) http.HandlerFunc {
 		if !tools.IsKnownTool(req.Tool) {
 			writeJSONError(w, http.StatusBadRequest, "unknown tool")
 			return
+		}
+
+		// run_in_background stacks a second async layer on top of the job's own
+		// goroutine: the job would complete immediately with a shell ID rather than
+		// the command output. Reject it early to avoid the confusing semantics.
+		if req.Tool == "bash" {
+			if bg, ok := req.Arguments["run_in_background"].(bool); ok && bg {
+				writeJSONError(w, http.StatusBadRequest, "run_in_background is not supported for async tool calls")
+				return
+			}
 		}
 
 		jobID := state.StartJob(req.Tool, req.Arguments)
