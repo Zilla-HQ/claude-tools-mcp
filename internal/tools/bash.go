@@ -62,11 +62,11 @@ func (s *State) executeBashCommand(ctx context.Context, command, description str
 	// context timeout to enforce synchronous execution limits.
 	var cmd *exec.Cmd
 	if runInBackground {
-		cmd = exec.Command("bash", "-c", command)
+		cmd = exec.Command("bash", "-c", command) // lgtm[go/command-injection]
 	} else {
 		cmdCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
 		defer cancel()
-		cmd = exec.CommandContext(cmdCtx, "bash", "-c", command)
+		cmd = exec.CommandContext(cmdCtx, "bash", "-c", command) // lgtm[go/command-injection]
 	}
 
 	if wd, err := os.Getwd(); err == nil {

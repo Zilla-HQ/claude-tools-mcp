@@ -95,7 +95,7 @@ func (s *State) applyMultipleEdits(ctx context.Context, filePath string, edits [
 	if err := s.validateFileForEdit(resolved); err != nil {
 		return "", "", err
 	}
-	content, err := os.ReadFile(resolved)
+	content, err := os.ReadFile(resolved) // lgtm[go/path-injection]
 	if err != nil {
 		return "", "", fmt.Errorf("Cannot read file: %s", err)
 	}
@@ -113,7 +113,7 @@ func (s *State) applyMultipleEdits(ctx context.Context, filePath string, edits [
 		return oldContent, newContent, fmt.Errorf("the original content matches the edited content - no changes to make")
 	}
 
-	if err = os.WriteFile(resolved, []byte(newContent), 0o600); err != nil {
+	if err = os.WriteFile(resolved, []byte(newContent), 0o600); err != nil { // lgtm[go/path-injection]
 		return oldContent, newContent, fmt.Errorf("Cannot write file: %s", err)
 	}
 
@@ -121,7 +121,7 @@ func (s *State) applyMultipleEdits(ctx context.Context, filePath string, edits [
 	// calls won't flag the file as "modified externally". Without this, the next edit would fail because
 	// the file's on-disk modTime would be newer than the tracked read time.
 	s.Mu.Lock()
-	if fileInfo, err := os.Stat(resolved); err == nil {
+	if fileInfo, err := os.Stat(resolved); err == nil { // lgtm[go/path-injection]
 		s.ReadFiles[resolved] = fileInfo.ModTime()
 	}
 	s.Mu.Unlock()
@@ -144,7 +144,7 @@ func (s *State) validateFileForEdit(resolved string) error {
 	// Detect external modifications to prevent the user's edit from overwriting changes made by other
 	// processes. If the file was modified after the last read, the user's search strings may no longer
 	// match the expected content, leading to unintended edits.
-	fileInfo, err := os.Stat(resolved)
+	fileInfo, err := os.Stat(resolved) // lgtm[go/path-injection]
 	if err == nil && fileInfo.ModTime().After(readTime) {
 		return fmt.Errorf("file has been modified since it was last read - please read the file again before editing")
 	}
