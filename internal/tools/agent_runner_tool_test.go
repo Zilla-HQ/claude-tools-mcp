@@ -22,7 +22,7 @@ func TestStartAgentJob_ReturnsJobID(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	jobID := state.StartAgentJob(tmpDir)
+	jobID := state.StartAgentJob(DevRunAgentInput{WorkDir: tmpDir, SystemPrompt: "test", UserPrompt: "test", Provider: "anthropic", ModelId: "claude-haiku-4-5-20251001"})
 
 	assert.NotEmpty(t, jobID)
 	assert.True(t, len(jobID) > 0)
@@ -35,7 +35,7 @@ func TestStartAgentJob_JobAppearsInState(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	jobID := state.StartAgentJob(tmpDir)
+	jobID := state.StartAgentJob(DevRunAgentInput{WorkDir: tmpDir, SystemPrompt: "test", UserPrompt: "test", Provider: "anthropic", ModelId: "claude-haiku-4-5-20251001"})
 
 	// Retrieve the job snapshot
 	snapshot := state.GetJob(jobID)
@@ -53,7 +53,7 @@ func TestStartAgentJob_CreatesFIFO(t *testing.T) {
 
 	t.Setenv("ZILLA_JOB_RUNTIME_DIR", runtimeDir)
 
-	jobID := state.StartAgentJob(tmpDir)
+	jobID := state.StartAgentJob(DevRunAgentInput{WorkDir: tmpDir, SystemPrompt: "test", UserPrompt: "test", Provider: "anthropic", ModelId: "claude-haiku-4-5-20251001"})
 	assert.NotEmpty(t, jobID)
 
 	// Give the goroutine time to create the FIFO
@@ -74,7 +74,7 @@ func TestStartAgentJob_MissingAgentRunner(t *testing.T) {
 	// Unset the agent runner path to simulate missing executable
 	t.Setenv("ZILLA_AGENT_RUNNER_PATH", "")
 
-	jobID := state.StartAgentJob(tmpDir)
+	jobID := state.StartAgentJob(DevRunAgentInput{WorkDir: tmpDir, SystemPrompt: "test", UserPrompt: "test", Provider: "anthropic", ModelId: "claude-haiku-4-5-20251001"})
 	assert.NotEmpty(t, jobID)
 
 	// Wait a bit for the job to start and potentially fail

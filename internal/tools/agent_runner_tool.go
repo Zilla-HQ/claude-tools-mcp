@@ -1,7 +1,9 @@
 package tools
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,13 +20,30 @@ var DevRunAgentTool = sdk.Tool{
 }
 
 type DevRunAgentInput struct {
-	WorkDir string `json:"workDir"`
+	WorkDir       string `json:"workDir"`
+	SystemPrompt  string `json:"systemPrompt"`
+	UserPrompt    string `json:"userPrompt"`
+	Provider      string `json:"provider"`
+	ModelId       string `json:"modelId"`
+	MaxIterations *int   `json:"maxIterations,omitempty"`
+}
+
+// agentRunnerSpec is the JSON blob written to the runner subprocess's stdin.
+type agentRunnerSpec struct {
+	JobId         string `json:"jobId"`
+	FifoPath      string `json:"fifoPath"`
+	WorkDir       string `json:"workDir"`
+	SystemPrompt  string `json:"systemPrompt"`
+	UserPrompt    string `json:"userPrompt"`
+	Provider      string `json:"provider"`
+	ModelId       string `json:"modelId"`
+	MaxIterations *int   `json:"maxIterations,omitempty"`
 }
 
 // StartAgentJob allocates a job ID, creates the per-job FIFO under
 // $ZILLA_JOB_RUNTIME_DIR/<jobId>/events.fifo, spawns $ZILLA_AGENT_RUNNER_PATH,
 // and starts the event pusher goroutine. Returns the job ID.
-func (s *State) StartAgentJob(workDir string) string {
+func (s *State) StartAgentJob(input DevRunAgentInput) string {
 	s.Mu.Lock()
 	jobID := fmt.Sprintf("job_%d", s.NextJobID)
 	s.NextJobID++
@@ -39,12 +58,13 @@ func (s *State) StartAgentJob(workDir string) string {
 	s.Jobs[jobID] = job
 	s.Mu.Unlock()
 
-	go s.runAgentJob(job, workDir)
+	go s.runAgentJob(job, input)
 
 	return jobID
 }
 
-func (s *State) runAgentJob(job *Job, workDir string) {
+func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
+	workDir := input.WorkDir
 	defer job.cancel()
 
 	runtimeDir := os.Getenv("ZILLA_JOB_RUNTIME_DIR")
@@ -79,8 +99,26 @@ func (s *State) runAgentJob(job *Job, workDir string) {
 		return
 	}
 
+	spec := agentRunnerSpec{
+		JobId:         job.ID,
+		FifoPath:      fifoPath,
+		WorkDir:       workDir,
+		SystemPrompt:  input.SystemPrompt,
+		UserPrompt:    input.UserPrompt,
+		Provider:      input.Provider,
+		ModelId:       input.ModelId,
+		MaxIterations: input.MaxIterations,
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		fifoReader.Close()
+		s.failJob(job, fmt.Sprintf("failed to marshal agent spec: %v", err))
+		return
+	}
+
 	cmd := exec.Command(runnerPath, job.ID, fifoPath, workDir)
 	cmd.Dir = workDir
+	cmd.Stdin = bytes.NewReader(specJSON)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// Assign Cmd before starting the goroutine so CancelAgentJob can safely read it.
@@ -191,7 +229,7 @@ func (s *State) GetJobEvents(jobID string) [][]byte {
 // DevRunAgent is the MCP handler for dev_run_agent.
 func DevRunAgent(ctx context.Context, req *sdk.CallToolRequest, args DevRunAgentInput) (*sdk.CallToolResult, any, error) {
 	state := GetState()
-	jobID := state.StartAgentJob(args.WorkDir)
+	jobID := state.StartAgentJob(args)
 	return &sdk.CallToolResult{
 		Content: []sdk.Content{&sdk.TextContent{Text: jobID}},
 	}, nil, nil
