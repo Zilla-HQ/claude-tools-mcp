@@ -56,7 +56,7 @@ func (s *State) startEventPusher(jobID string, fifoReader *os.File) {
 			backoffs := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}
 			delivered := false
 			for i, wait := range backoffs {
-				if postEvent(webhookURL, sig, sandboxID, event) {
+				if postEvent(webhookURL, sig, sandboxID, jobID, event) {
 					delivered = true
 					break
 				}
@@ -83,7 +83,7 @@ func computeHMAC(secret string, data []byte) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
-func postEvent(url, sig, sandboxID string, body []byte) bool {
+func postEvent(url, sig, sandboxID, jobID string, body []byte) bool {
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return false
@@ -91,6 +91,7 @@ func postEvent(url, sig, sandboxID string, body []byte) bool {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Sandbox-Signature", sig)
 	req.Header.Set("X-Sandbox-Id", sandboxID)
+	req.Header.Set("X-Job-Id", jobID)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

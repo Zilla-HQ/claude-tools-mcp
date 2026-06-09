@@ -1,5 +1,6 @@
 # Binaries
 bin/
+/claude-tools-mcp
 *.exe
 *.dll
 *.so
