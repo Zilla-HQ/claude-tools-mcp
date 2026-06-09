@@ -1,8 +1,11 @@
 package tools
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,33 +21,28 @@ var DevRunAgentTool = sdk.Tool{
 }
 
 type DevRunAgentInput struct {
-	WorkDir string `json:"workDir"`
+	WorkDir       string `json:"workDir"`
+	SystemPrompt  string `json:"systemPrompt"`
+	UserPrompt    string `json:"userPrompt"`
+	Provider      string `json:"provider"`
+	ModelId       string `json:"modelId"`
+	MaxIterations *int   `json:"maxIterations,omitempty"`
 }
 
-// StartAgentJob allocates a job ID, creates the per-job FIFO under
-// $ZILLA_JOB_RUNTIME_DIR/<jobId>/events.fifo, spawns $ZILLA_AGENT_RUNNER_PATH,
-// and starts the event pusher goroutine. Returns the job ID.
-func (s *State) StartAgentJob(workDir string) string {
-	s.Mu.Lock()
-	jobID := fmt.Sprintf("job_%d", s.NextJobID)
-	s.NextJobID++
-	job := &Job{
-		ID:       jobID,
-		ToolName: "dev_run_agent",
-		Status:   JobStatusRunning,
-		Done:     make(chan struct{}),
-		cancel:   func() {},
-		Events:   NewEventRing(256),
-	}
-	s.Jobs[jobID] = job
-	s.Mu.Unlock()
-
-	go s.runAgentJob(job, workDir)
-
-	return jobID
+// agentRunnerSpec is the JSON blob written to the runner subprocess's stdin.
+type agentRunnerSpec struct {
+	JobId         string `json:"jobId"`
+	FifoPath      string `json:"fifoPath"`
+	WorkDir       string `json:"workDir"`
+	SystemPrompt  string `json:"systemPrompt"`
+	UserPrompt    string `json:"userPrompt"`
+	Provider      string `json:"provider"`
+	ModelId       string `json:"modelId"`
+	MaxIterations *int   `json:"maxIterations,omitempty"`
 }
 
-func (s *State) runAgentJob(job *Job, workDir string) {
+func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
+	workDir := input.WorkDir
 	defer job.cancel()
 
 	runtimeDir := os.Getenv("ZILLA_JOB_RUNTIME_DIR")
@@ -55,32 +53,71 @@ func (s *State) runAgentJob(job *Job, workDir string) {
 	jobDir := filepath.Join(runtimeDir, job.ID)
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
 		s.failJob(job, fmt.Sprintf("failed to create job dir: %v", err))
+		log.Printf("[agent-runner] job %s: failed to create job dir: %v", job.ID, err)
 		return
 	}
 
 	fifoPath := filepath.Join(jobDir, "events.fifo")
 	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
 		s.failJob(job, fmt.Sprintf("failed to create FIFO: %v", err))
+		log.Printf("[agent-runner] job %s: failed to create FIFO: %v", job.ID, err)
 		return
 	}
+	log.Printf("[agent-runner] job %s: FIFO created at %s", job.ID, fifoPath)
 
 	// Open the read end non-blocking BEFORE the subprocess opens the write end,
 	// so the open() call doesn't block waiting for a writer.
 	fifoReader, err := os.OpenFile(fifoPath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		s.failJob(job, fmt.Sprintf("failed to open FIFO for reading: %v", err))
+		log.Printf("[agent-runner] job %s: failed to open FIFO reader: %v", job.ID, err)
+		return
+	}
+
+	// Open a sentinel write end so the reader's writer-count is 1, not 0.
+	// With writer-count == 0, any Read() returns EOF immediately — the scanner
+	// goroutine would exit before the runner process opens the real write end,
+	// after which the runner's open(O_WRONLY) would block forever (no reader).
+	// Keeping one write fd open prevents premature EOF; we close it only after
+	// the runner subprocess exits.
+	fifoSentinel, err := os.OpenFile(fifoPath, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		fifoReader.Close()
+		s.failJob(job, fmt.Sprintf("failed to open FIFO sentinel: %v", err))
+		log.Printf("[agent-runner] job %s: failed to open FIFO sentinel: %v", job.ID, err)
 		return
 	}
 
 	runnerPath := os.Getenv("ZILLA_AGENT_RUNNER_PATH")
 	if runnerPath == "" {
 		fifoReader.Close()
+		fifoSentinel.Close()
 		s.failJob(job, "ZILLA_AGENT_RUNNER_PATH is not set")
+		log.Printf("[agent-runner] job %s: ZILLA_AGENT_RUNNER_PATH is not set", job.ID)
+		return
+	}
+
+	spec := agentRunnerSpec{
+		JobId:         job.ID,
+		FifoPath:      fifoPath,
+		WorkDir:       workDir,
+		SystemPrompt:  input.SystemPrompt,
+		UserPrompt:    input.UserPrompt,
+		Provider:      input.Provider,
+		ModelId:       input.ModelId,
+		MaxIterations: input.MaxIterations,
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		fifoReader.Close()
+		fifoSentinel.Close()
+		s.failJob(job, fmt.Sprintf("failed to marshal agent spec: %v", err))
 		return
 	}
 
 	cmd := exec.Command(runnerPath, job.ID, fifoPath, workDir)
 	cmd.Dir = workDir
+	cmd.Stdin = bytes.NewReader(specJSON)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// Assign Cmd before starting the goroutine so CancelAgentJob can safely read it.
@@ -90,26 +127,34 @@ func (s *State) runAgentJob(job *Job, workDir string) {
 
 	if err := cmd.Start(); err != nil {
 		fifoReader.Close()
+		fifoSentinel.Close()
 		s.failJob(job, fmt.Sprintf("failed to start agent runner: %v", err))
+		log.Printf("[agent-runner] job %s: failed to start runner process: %v", job.ID, err)
 		return
 	}
+	log.Printf("[agent-runner] job %s: runner process started (pid=%d)", job.ID, cmd.Process.Pid)
 
-	// Only start the pusher after the subprocess is running — it will open the write end.
+	// Start the pusher now — fifoSentinel keeps writer-count ≥ 1 so the
+	// scanner blocks (via Go's runtime poller) instead of returning EOF.
 	go s.startEventPusher(job.ID, fifoReader)
 
-	// Wait for process; update job status when done.
+	// Wait for process; close sentinel so the pusher drains remaining events
+	// then gets EOF, and update job status.
 	go func() {
 		err := cmd.Wait()
+		fifoSentinel.Close()
 		s.Mu.Lock()
 		defer s.Mu.Unlock()
 		if job.Status == JobStatusCancelled {
-			// already transitioned by cancel handler
+			log.Printf("[agent-runner] job %s: runner cancelled (pid=%d)", job.ID, cmd.Process.Pid)
 		} else if err != nil {
 			msg := err.Error()
 			job.Error = &msg
 			job.Status = JobStatusFailed
+			log.Printf("[agent-runner] job %s: runner exited with error: %v", job.ID, err)
 		} else {
 			job.Status = JobStatusDone
+			log.Printf("[agent-runner] job %s: runner exited cleanly", job.ID)
 		}
 		select {
 		case <-job.Done:
@@ -120,6 +165,7 @@ func (s *State) runAgentJob(job *Job, workDir string) {
 }
 
 func (s *State) failJob(job *Job, msg string) {
+	log.Printf("[agent-runner] job %s: FAILED — %s", job.ID, msg)
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 	job.Status = JobStatusFailed
@@ -191,7 +237,17 @@ func (s *State) GetJobEvents(jobID string) [][]byte {
 // DevRunAgent is the MCP handler for dev_run_agent.
 func DevRunAgent(ctx context.Context, req *sdk.CallToolRequest, args DevRunAgentInput) (*sdk.CallToolResult, any, error) {
 	state := GetState()
-	jobID := state.StartAgentJob(args.WorkDir)
+	argsMap := map[string]interface{}{
+		"workDir":      args.WorkDir,
+		"systemPrompt": args.SystemPrompt,
+		"userPrompt":   args.UserPrompt,
+		"provider":     args.Provider,
+		"modelId":      args.ModelId,
+	}
+	if args.MaxIterations != nil {
+		argsMap["maxIterations"] = *args.MaxIterations
+	}
+	jobID := state.StartJob("dev_run_agent", argsMap)
 	return &sdk.CallToolResult{
 		Content: []sdk.Content{&sdk.TextContent{Text: jobID}},
 	}, nil, nil

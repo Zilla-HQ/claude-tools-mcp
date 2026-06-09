@@ -20,6 +20,7 @@ import (
 func (s *State) startEventPusher(jobID string, fifoReader *os.File) {
 	go func() {
 		defer fifoReader.Close()
+		log.Printf("[event-pusher] job %s: started", jobID)
 
 		scanner := bufio.NewScanner(fifoReader)
 		for scanner.Scan() {
@@ -67,6 +68,11 @@ func (s *State) startEventPusher(jobID string, fifoReader *os.File) {
 				s.WebhookDrops.Add(1)
 				log.Printf("[event-pusher] dropped event for job %s after max retries", jobID)
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			log.Printf("[event-pusher] job %s: scanner error: %v", jobID, err)
+		} else {
+			log.Printf("[event-pusher] job %s: done (EOF)", jobID)
 		}
 	}()
 }
