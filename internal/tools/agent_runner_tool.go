@@ -92,9 +92,23 @@ func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
 		return
 	}
 
+	// Open a sentinel write end so the reader's writer-count is 1, not 0.
+	// With writer-count == 0, any Read() returns EOF immediately — the scanner
+	// goroutine would exit before the runner process opens the real write end,
+	// after which the runner's open(O_WRONLY) would block forever (no reader).
+	// Keeping one write fd open prevents premature EOF; we close it only after
+	// the runner subprocess exits.
+	fifoSentinel, err := os.OpenFile(fifoPath, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		fifoReader.Close()
+		s.failJob(job, fmt.Sprintf("failed to open FIFO sentinel: %v", err))
+		return
+	}
+
 	runnerPath := os.Getenv("ZILLA_AGENT_RUNNER_PATH")
 	if runnerPath == "" {
 		fifoReader.Close()
+		fifoSentinel.Close()
 		s.failJob(job, "ZILLA_AGENT_RUNNER_PATH is not set")
 		return
 	}
@@ -112,6 +126,7 @@ func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
 	specJSON, err := json.Marshal(spec)
 	if err != nil {
 		fifoReader.Close()
+		fifoSentinel.Close()
 		s.failJob(job, fmt.Sprintf("failed to marshal agent spec: %v", err))
 		return
 	}
@@ -128,16 +143,20 @@ func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
 
 	if err := cmd.Start(); err != nil {
 		fifoReader.Close()
+		fifoSentinel.Close()
 		s.failJob(job, fmt.Sprintf("failed to start agent runner: %v", err))
 		return
 	}
 
-	// Only start the pusher after the subprocess is running — it will open the write end.
+	// Start the pusher now — fifoSentinel keeps writer-count ≥ 1 so the
+	// scanner blocks (via Go's runtime poller) instead of returning EOF.
 	go s.startEventPusher(job.ID, fifoReader)
 
-	// Wait for process; update job status when done.
+	// Wait for process; close sentinel so the pusher drains remaining events
+	// then gets EOF, and update job status.
 	go func() {
 		err := cmd.Wait()
+		fifoSentinel.Close()
 		s.Mu.Lock()
 		defer s.Mu.Unlock()
 		if job.Status == JobStatusCancelled {
