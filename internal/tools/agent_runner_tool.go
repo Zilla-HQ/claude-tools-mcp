@@ -41,30 +41,6 @@ type agentRunnerSpec struct {
 	MaxIterations *int   `json:"maxIterations,omitempty"`
 }
 
-// StartAgentJob allocates a job ID, creates the per-job FIFO under
-// $ZILLA_JOB_RUNTIME_DIR/<jobId>/events.fifo, spawns $ZILLA_AGENT_RUNNER_PATH,
-// and starts the event pusher goroutine. Returns the job ID.
-func (s *State) StartAgentJob(input DevRunAgentInput) string {
-	s.Mu.Lock()
-	jobID := fmt.Sprintf("job_%d", s.NextJobID)
-	s.NextJobID++
-	job := &Job{
-		ID:       jobID,
-		ToolName: "dev_run_agent",
-		Status:   JobStatusRunning,
-		Done:     make(chan struct{}),
-		cancel:   func() {},
-		Events:   NewEventRing(256),
-	}
-	s.Jobs[jobID] = job
-	s.Mu.Unlock()
-
-	log.Printf("[agent-runner] job %s: starting (model=%s provider=%s workDir=%s)", jobID, input.ModelId, input.Provider, input.WorkDir)
-	go s.runAgentJob(job, input)
-
-	return jobID
-}
-
 func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
 	workDir := input.WorkDir
 	defer job.cancel()
@@ -261,7 +237,17 @@ func (s *State) GetJobEvents(jobID string) [][]byte {
 // DevRunAgent is the MCP handler for dev_run_agent.
 func DevRunAgent(ctx context.Context, req *sdk.CallToolRequest, args DevRunAgentInput) (*sdk.CallToolResult, any, error) {
 	state := GetState()
-	jobID := state.StartAgentJob(args)
+	argsMap := map[string]interface{}{
+		"workDir":      args.WorkDir,
+		"systemPrompt": args.SystemPrompt,
+		"userPrompt":   args.UserPrompt,
+		"provider":     args.Provider,
+		"modelId":      args.ModelId,
+	}
+	if args.MaxIterations != nil {
+		argsMap["maxIterations"] = *args.MaxIterations
+	}
+	jobID := state.StartJob("dev_run_agent", argsMap)
 	return &sdk.CallToolResult{
 		Content: []sdk.Content{&sdk.TextContent{Text: jobID}},
 	}, nil, nil

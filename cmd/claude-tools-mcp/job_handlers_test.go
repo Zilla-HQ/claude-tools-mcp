@@ -34,7 +34,7 @@ func TestCancelJob_TransitionsToCancelled(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Start a long-running job
-	jobID := state.StartAgentJob(tmpDir)
+	jobID := state.StartJob("dev_run_agent", map[string]interface{}{"workDir": tmpDir, "systemPrompt": "test", "userPrompt": "test", "provider": "anthropic", "modelId": "claude-haiku-4-5-20251001"})
 	assert.NotEmpty(t, jobID)
 
 	// POST to cancel the job
@@ -90,7 +90,7 @@ func TestGetJobEvents_ReturnsEvents(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Start a job
-	jobID := state.StartAgentJob(tmpDir)
+	jobID := state.StartJob("dev_run_agent", map[string]interface{}{"workDir": tmpDir, "systemPrompt": "test", "userPrompt": "test", "provider": "anthropic", "modelId": "claude-haiku-4-5-20251001"})
 	assert.NotEmpty(t, jobID)
 
 	// Get the job and manually add events to its ring (simulating what the pusher would do)
@@ -137,7 +137,7 @@ func TestGetJobEvents_EmptyInitially(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	jobID := state.StartAgentJob(tmpDir)
+	jobID := state.StartJob("dev_run_agent", map[string]interface{}{"workDir": tmpDir, "systemPrompt": "test", "userPrompt": "test", "provider": "anthropic", "modelId": "claude-haiku-4-5-20251001"})
 	assert.NotEmpty(t, jobID)
 
 	resp, err := http.Get(server.URL + "/jobs/" + jobID + "/events")
@@ -161,7 +161,7 @@ func TestCancelJob_ProcessExitsQuickly(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	jobID := state.StartAgentJob(tmpDir)
+	jobID := state.StartJob("dev_run_agent", map[string]interface{}{"workDir": tmpDir, "systemPrompt": "test", "userPrompt": "test", "provider": "anthropic", "modelId": "claude-haiku-4-5-20251001"})
 	assert.NotEmpty(t, jobID)
 
 	startTime := time.Now()
@@ -201,7 +201,7 @@ func TestGetJobEvents_ContentType(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	jobID := state.StartAgentJob(tmpDir)
+	jobID := state.StartJob("dev_run_agent", map[string]interface{}{"workDir": tmpDir, "systemPrompt": "test", "userPrompt": "test", "provider": "anthropic", "modelId": "claude-haiku-4-5-20251001"})
 	assert.NotEmpty(t, jobID)
 
 	resp, err := http.Get(server.URL + "/jobs/" + jobID + "/events")
@@ -220,7 +220,7 @@ func TestCancelJob_MultipleCancel(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	jobID := state.StartAgentJob(tmpDir)
+	jobID := state.StartJob("dev_run_agent", map[string]interface{}{"workDir": tmpDir, "systemPrompt": "test", "userPrompt": "test", "provider": "anthropic", "modelId": "claude-haiku-4-5-20251001"})
 	assert.NotEmpty(t, jobID)
 
 	// Cancel once
