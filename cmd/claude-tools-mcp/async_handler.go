@@ -53,7 +53,21 @@ func handleAsyncStart(state *tools.State) http.HandlerFunc {
 			}
 		}
 
-		jobID := state.StartJob(req.Tool, req.Arguments)
+		var jobID string
+		if req.Tool == "dev_run_agent" {
+			// dev_run_agent has its own job lifecycle: FIFO, EventRing, subprocess.
+			// Route directly to StartAgentJob rather than the generic dispatcher,
+			// which would run in a goroutine with no EventRing and return "unknown tool".
+			argsJSON, _ := json.Marshal(req.Arguments)
+			var input tools.DevRunAgentInput
+			if err := json.Unmarshal(argsJSON, &input); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid dev_run_agent arguments")
+				return
+			}
+			jobID = state.StartAgentJob(input)
+		} else {
+			jobID = state.StartJob(req.Tool, req.Arguments)
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
