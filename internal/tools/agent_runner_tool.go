@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,6 +59,7 @@ func (s *State) StartAgentJob(input DevRunAgentInput) string {
 	s.Jobs[jobID] = job
 	s.Mu.Unlock()
 
+	log.Printf("[agent-runner] job %s: starting (model=%s provider=%s workDir=%s)", jobID, input.ModelId, input.Provider, input.WorkDir)
 	go s.runAgentJob(job, input)
 
 	return jobID
@@ -75,20 +77,24 @@ func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
 	jobDir := filepath.Join(runtimeDir, job.ID)
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
 		s.failJob(job, fmt.Sprintf("failed to create job dir: %v", err))
+		log.Printf("[agent-runner] job %s: failed to create job dir: %v", job.ID, err)
 		return
 	}
 
 	fifoPath := filepath.Join(jobDir, "events.fifo")
 	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
 		s.failJob(job, fmt.Sprintf("failed to create FIFO: %v", err))
+		log.Printf("[agent-runner] job %s: failed to create FIFO: %v", job.ID, err)
 		return
 	}
+	log.Printf("[agent-runner] job %s: FIFO created at %s", job.ID, fifoPath)
 
 	// Open the read end non-blocking BEFORE the subprocess opens the write end,
 	// so the open() call doesn't block waiting for a writer.
 	fifoReader, err := os.OpenFile(fifoPath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		s.failJob(job, fmt.Sprintf("failed to open FIFO for reading: %v", err))
+		log.Printf("[agent-runner] job %s: failed to open FIFO reader: %v", job.ID, err)
 		return
 	}
 
@@ -102,6 +108,7 @@ func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
 	if err != nil {
 		fifoReader.Close()
 		s.failJob(job, fmt.Sprintf("failed to open FIFO sentinel: %v", err))
+		log.Printf("[agent-runner] job %s: failed to open FIFO sentinel: %v", job.ID, err)
 		return
 	}
 
@@ -110,6 +117,7 @@ func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
 		fifoReader.Close()
 		fifoSentinel.Close()
 		s.failJob(job, "ZILLA_AGENT_RUNNER_PATH is not set")
+		log.Printf("[agent-runner] job %s: ZILLA_AGENT_RUNNER_PATH is not set", job.ID)
 		return
 	}
 
@@ -145,8 +153,10 @@ func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
 		fifoReader.Close()
 		fifoSentinel.Close()
 		s.failJob(job, fmt.Sprintf("failed to start agent runner: %v", err))
+		log.Printf("[agent-runner] job %s: failed to start runner process: %v", job.ID, err)
 		return
 	}
+	log.Printf("[agent-runner] job %s: runner process started (pid=%d)", job.ID, cmd.Process.Pid)
 
 	// Start the pusher now — fifoSentinel keeps writer-count ≥ 1 so the
 	// scanner blocks (via Go's runtime poller) instead of returning EOF.
@@ -160,13 +170,15 @@ func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
 		s.Mu.Lock()
 		defer s.Mu.Unlock()
 		if job.Status == JobStatusCancelled {
-			// already transitioned by cancel handler
+			log.Printf("[agent-runner] job %s: runner cancelled (pid=%d)", job.ID, cmd.Process.Pid)
 		} else if err != nil {
 			msg := err.Error()
 			job.Error = &msg
 			job.Status = JobStatusFailed
+			log.Printf("[agent-runner] job %s: runner exited with error: %v", job.ID, err)
 		} else {
 			job.Status = JobStatusDone
+			log.Printf("[agent-runner] job %s: runner exited cleanly", job.ID)
 		}
 		select {
 		case <-job.Done:
@@ -177,6 +189,7 @@ func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
 }
 
 func (s *State) failJob(job *Job, msg string) {
+	log.Printf("[agent-runner] job %s: FAILED — %s", job.ID, msg)
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 	job.Status = JobStatusFailed
