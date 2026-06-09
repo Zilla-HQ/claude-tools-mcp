@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os/exec"
 	"time"
 
@@ -52,11 +53,12 @@ type Job struct {
 // goroutine that executes the tool. It returns the assigned job ID.
 // The job runs against context.Background() so it is not cancelled when the
 // originating HTTP request context is cancelled.
+//
+// dev_run_agent is handled specially: it initialises the EventRing and
+// delegates to runAgentJob (FIFO + subprocess). All other tools go through
+// dispatchTool and store their result in Job.Result.
 func (s *State) StartJob(toolName string, args map[string]interface{}) string {
 	argsJSON, _ := json.Marshal(args)
-
-	// Use Background so the job outlives the HTTP request that started it.
-	jobCtx, cancel := context.WithCancel(context.Background())
 
 	s.Mu.Lock()
 	jobID := fmt.Sprintf("job_%d", s.NextJobID)
@@ -68,9 +70,27 @@ func (s *State) StartJob(toolName string, args map[string]interface{}) string {
 		Status:    JobStatusRunning,
 		CreatedAt: time.Now(),
 		Done:      make(chan struct{}),
-		cancel:    cancel,
+		cancel:    func() {},
 	}
 	s.Jobs[jobID] = job
+	s.Mu.Unlock()
+
+	if toolName == "dev_run_agent" {
+		var input DevRunAgentInput
+		if err := json.Unmarshal(argsJSON, &input); err != nil {
+			s.failJob(job, fmt.Sprintf("invalid dev_run_agent arguments: %v", err))
+			return jobID
+		}
+		job.Events = NewEventRing(256)
+		log.Printf("[agent-runner] job %s: starting (model=%s provider=%s workDir=%s)", jobID, input.ModelId, input.Provider, input.WorkDir)
+		go s.runAgentJob(job, input)
+		return jobID
+	}
+
+	// Generic tool path: run to completion, store result in Job.Result.
+	jobCtx, cancel := context.WithCancel(context.Background())
+	s.Mu.Lock()
+	job.cancel = cancel
 	s.Mu.Unlock()
 
 	go func() {
