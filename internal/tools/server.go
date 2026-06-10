@@ -30,10 +30,6 @@ type State struct {
 	// Jobs maps job IDs to their corresponding Job structs for async tool calls.
 	Jobs map[string]*Job
 
-	// NextJobID is a monotonically increasing counter used to generate unique
-	// job IDs (e.g., "job_1", "job_2"). Protected by Mu.Lock().
-	NextJobID int
-
 	// WebhookDrops counts events dropped after exhausting all retry attempts.
 	WebhookDrops atomic.Int64
 
@@ -56,9 +52,8 @@ func NewState() *State {
 		ReadFiles:        make(map[string]time.Time),
 		BackgroundShells: make(map[string]*BackgroundShell),
 		NextShellID:      1,
-		Jobs:             make(map[string]*Job),
-		NextJobID:        1,
-		stopEviction:     cancel,
+		Jobs:         make(map[string]*Job),
+		stopEviction: cancel,
 	}
 	go s.evictLoop(ctx)
 	return s

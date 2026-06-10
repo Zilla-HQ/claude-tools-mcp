@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/google/uuid"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -61,8 +62,7 @@ func (s *State) StartJob(toolName string, args map[string]interface{}) string {
 	argsJSON, _ := json.Marshal(args)
 
 	s.Mu.Lock()
-	jobID := fmt.Sprintf("job_%d", s.NextJobID)
-	s.NextJobID++
+	jobID := uuid.New().String()
 	job := &Job{
 		ID:        jobID,
 		ToolName:  toolName,
