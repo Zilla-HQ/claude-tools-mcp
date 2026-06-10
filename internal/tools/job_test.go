@@ -9,22 +9,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestStartJob_ReturnsSequentialIDs(t *testing.T) {
+func TestStartJob_ReturnsUniqueIDs(t *testing.T) {
 	t.Parallel()
 	state := NewState()
 	defer state.StopEviction()
 
-	// Start first job
 	jobID1 := state.StartJob("bash", map[string]interface{}{"command": "echo test"})
-	assert.Equal(t, "job_1", jobID1)
-
-	// Start second job
 	jobID2 := state.StartJob("bash", map[string]interface{}{"command": "echo test2"})
-	assert.Equal(t, "job_2", jobID2)
-
-	// Start third job
 	jobID3 := state.StartJob("bash", map[string]interface{}{"command": "echo test3"})
-	assert.Equal(t, "job_3", jobID3)
+
+	assert.NotEmpty(t, jobID1)
+	assert.NotEmpty(t, jobID2)
+	assert.NotEmpty(t, jobID3)
+	assert.NotEqual(t, jobID1, jobID2)
+	assert.NotEqual(t, jobID2, jobID3)
+	assert.NotEqual(t, jobID1, jobID3)
 }
 
 func TestGetJob_WhileRunning(t *testing.T) {

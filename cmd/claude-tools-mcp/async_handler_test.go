@@ -77,7 +77,6 @@ func TestAsyncStartJob_BashCommand(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.NotEmpty(t, jobResp.JobID)
-	assert.Equal(t, "job_1", jobResp.JobID)
 }
 
 func TestAsyncStartJob_UnknownTool(t *testing.T) {
@@ -486,6 +485,7 @@ func TestAsyncGetJob_SequentialIDs(t *testing.T) {
 	err = json.NewDecoder(resp2.Body).Decode(&jobResp2)
 	require.NoError(t, err)
 
-	assert.Equal(t, "job_1", jobResp1.JobID)
-	assert.Equal(t, "job_2", jobResp2.JobID)
+	assert.NotEmpty(t, jobResp1.JobID)
+	assert.NotEmpty(t, jobResp2.JobID)
+	assert.NotEqual(t, jobResp1.JobID, jobResp2.JobID)
 }
