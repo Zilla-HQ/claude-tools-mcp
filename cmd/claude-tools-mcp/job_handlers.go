@@ -44,8 +44,19 @@ func handleGetJobEvents(state *tools.State) http.HandlerFunc {
 
 		events := state.GetJobEvents(jobID)
 
+		// Each stored event is already a JSON object encoded as []byte. Wrap as
+		// json.RawMessage so the response is a JSON array of OBJECTS. Encoding
+		// the raw [][]byte directly base64-encodes each element (Go marshals
+		// []byte as a base64 string), which breaks consumers that read event
+		// fields like `type` — the platform poll loop did exactly that and so
+		// never detected terminal events (jobs appeared to run forever).
+		raw := make([]json.RawMessage, len(events))
+		for i, e := range events {
+			raw[i] = json.RawMessage(e)
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(events); err != nil {
+		if err := json.NewEncoder(w).Encode(raw); err != nil {
 			log.Printf("failed to encode events: %v", err)
 		}
 	}

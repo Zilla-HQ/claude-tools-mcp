@@ -234,6 +234,19 @@ func (s *State) GetJobEvents(jobID string) [][]byte {
 	return job.Events.Snapshot()
 }
 
+// PushJobEventForTest injects a raw JSON event into a job's ring buffer. It
+// mirrors what the FIFO event pusher does and exists so handler tests can
+// populate events deterministically (GetJob returns a snapshot without the
+// ring). No-op if the job is missing or has no ring.
+func (s *State) PushJobEventForTest(jobID string, event []byte) {
+	s.Mu.RLock()
+	job, ok := s.Jobs[jobID]
+	s.Mu.RUnlock()
+	if ok && job.Events != nil {
+		job.Events.Push(event)
+	}
+}
+
 // DevRunAgent is the MCP handler for dev_run_agent.
 func DevRunAgent(ctx context.Context, req *sdk.CallToolRequest, args DevRunAgentInput) (*sdk.CallToolResult, any, error) {
 	state := GetState()

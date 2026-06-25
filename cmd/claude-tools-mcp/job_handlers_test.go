@@ -114,6 +114,46 @@ func TestGetJobEvents_ReturnsEvents(t *testing.T) {
 	assert.IsType(t, []json.RawMessage{}, events)
 }
 
+// Regression: the events endpoint must return JSON OBJECTS, not base64 strings.
+// Snapshot() is [][]byte; json-encoding it directly base64-encodes each element
+// (Go marshals []byte as a base64 string), which broke the platform poll loop's
+// terminal detection (it reads `type` off each event). Decoding into a slice of
+// maps fails outright if elements come back as base64 strings.
+func TestGetJobEvents_ReturnsObjectsNotBase64(t *testing.T) {
+	t.Parallel()
+	state := tools.NewState()
+	defer state.StopEviction()
+	server := setupJobHandlersTestServer(t, state)
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	jobID := state.StartJob("dev_run_agent", map[string]interface{}{"workDir": tmpDir, "systemPrompt": "test", "userPrompt": "test", "provider": "anthropic", "modelId": "claude-haiku-4-5-20251001"})
+	require.NotEmpty(t, jobID)
+
+	require.NotNil(t, state.GetJob(jobID))
+
+	// Inject a real event as the pusher would.
+	state.PushJobEventForTest(jobID, []byte(`{"type":"agent.done","seq":1,"spanId":"cli","ts":1}`))
+
+	resp, err := http.Get(server.URL + "/jobs/" + jobID + "/events")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Must decode as objects (would fail if any element were a base64 string).
+	var events []map[string]interface{}
+	err = json.NewDecoder(resp.Body).Decode(&events)
+	require.NoError(t, err)
+
+	found := false
+	for _, e := range events {
+		if e["type"] == "agent.done" {
+			found = true
+		}
+	}
+	assert.True(t, found, "expected an agent.done event object with a readable type field")
+}
+
 func TestGetJobEvents_UnknownJobReturns404(t *testing.T) {
 	t.Parallel()
 	state := tools.NewState()
