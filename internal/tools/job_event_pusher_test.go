@@ -243,6 +243,34 @@ func TestSynthesizesTerminalWhenRunnerExitsSilently(t *testing.T) {
 	assert.Contains(t, last, "signal: killed")
 }
 
+// A clean exit without a terminal event must synthesize agent.error, never
+// agent.done: the runner exits 0 for agent.out_of_turns too, so a lost
+// terminal line is ambiguous and synthesizing success could finalize
+// incomplete work (Codex P1 on the platform pin-bump PR).
+func TestSynthesizesErrorNotDoneOnCleanExit(t *testing.T) {
+	state := NewState()
+	defer state.StopEviction()
+	t.Setenv("PLATFORM_WEBHOOK_URL", "")
+
+	job := newTestJob(state, "job-clean-exit-lost-terminal")
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	state.startEventPusher(job.ID, r)
+
+	_, err = w.WriteString(`{"type":"tool.call","name":"bash"}` + "\n")
+	require.NoError(t, err)
+
+	// Runner exits cleanly (status done) but its terminal line never arrives.
+	markJobExited(state, job, JobStatusDone, "")
+	w.Close()
+
+	waitFor(t, 5*time.Second, "synthetic terminal in ring", func() bool {
+		return ringContains(job, `"synthetic":true`)
+	})
+	assert.True(t, ringContains(job, `"agent.error"`), "clean exit without terminal must synthesize agent.error")
+	assert.False(t, ringContains(job, `"agent.done"`), "must never synthesize agent.done")
+}
+
 // failJob runs before the pusher exists (FIFO/spawn failures); it must
 // synthesize a terminal event so the platform poll loop doesn't read "running"
 // until eviction.
