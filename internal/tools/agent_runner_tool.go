@@ -188,7 +188,7 @@ func (s *State) failJob(job *Job, msg string) {
 	// terminal event: claimTerminalSynthesis is atomic and Done is closed.
 	// Async because failJob can run on the HTTP request path and delivery
 	// retries are slow.
-	go s.synthesizeTerminalIfMissing(job.ID)
+	go s.synthesizeTerminalIfMissing(job.ID, nil)
 }
 
 // CancelAgentJob sends SIGTERM to the job's process group, waits up to 5s, then

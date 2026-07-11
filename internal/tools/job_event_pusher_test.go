@@ -243,6 +243,45 @@ func TestSynthesizesTerminalWhenRunnerExitsSilently(t *testing.T) {
 	assert.Contains(t, last, "signal: killed")
 }
 
+// Synthesis must run BEFORE the delivery queue drains (Codex P1 on the second
+// pin bump): with a wedged webhook, each queued event burns ~2 min of POST
+// timeouts — gating synthesis on <-deliveryDone would keep the synthetic
+// terminal out of the ring (the platform's poll path) long past the 1h ceiling
+// the backstop exists to prevent.
+func TestSynthesisNotBlockedByWedgedDelivery(t *testing.T) {
+	state := NewState()
+	defer state.StopEviction()
+
+	unblock := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-unblock // wedge every request until the test ends
+	}))
+	defer srv.Close()
+	defer close(unblock)
+	t.Setenv("PLATFORM_WEBHOOK_URL", srv.URL)
+
+	job := newTestJob(state, "job-wedged-synthesis")
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	state.startEventPusher(job.ID, r)
+
+	// Several non-terminal events pile up behind the wedged first POST.
+	for i := 0; i < 5; i++ {
+		_, err = w.WriteString(`{"type":"tool.call","name":"bash"}` + "\n")
+		require.NoError(t, err)
+	}
+
+	// Runner dies without a terminal event.
+	markJobExited(state, job, JobStatusFailed, "signal: killed")
+	w.Close()
+
+	// The synthetic terminal must reach the ring promptly — NOT after the
+	// wedged queue drains (which would take minutes of POST timeouts).
+	waitFor(t, 5*time.Second, "synthetic terminal in ring while delivery is wedged", func() bool {
+		return ringContains(job, `"agent.error"`) && ringContains(job, `"synthetic":true`)
+	})
+}
+
 // A clean exit without a terminal event must synthesize agent.error, never
 // agent.done: the runner exits 0 for agent.out_of_turns too, so a lost
 // terminal line is ambiguous and synthesizing success could finalize
