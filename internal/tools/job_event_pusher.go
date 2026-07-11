@@ -119,15 +119,21 @@ func (s *State) startEventPusher(jobID string, fifoReader *os.File) {
 			log.Printf("[event-pusher] job %s: done (EOF)", jobID)
 		}
 
-		// Close the reader BEFORE waiting on delivery or the job: after a
-		// scanner error the runner may still be writing, and an open-but-unread
-		// FIFO blocks it forever once the pipe buffer fills. Closing gives the
-		// writer EPIPE so it can exit and cmd.Wait can record a status.
+		// Close the reader BEFORE waiting on anything: after a scanner error
+		// the runner may still be writing, and an open-but-unread FIFO blocks
+		// it forever once the pipe buffer fills. Closing gives the writer
+		// EPIPE so it can exit and cmd.Wait can record a status.
 		fifoReader.Close()
+
+		// Synthesize BEFORE draining the delivery queue: with a wedged webhook
+		// each queued event can burn ~2 min of POST timeouts, and the whole
+		// point of synthesis is to put a terminal event where the platform
+		// poll loop can see it (the ring) promptly. The synthetic's own
+		// webhook copy rides the queue like any other event.
+		s.synthesizeTerminalIfMissing(jobID, queue)
+
 		close(queue)
 		<-deliveryDone
-
-		s.synthesizeTerminalIfMissing(jobID)
 	}()
 }
 
@@ -165,8 +171,11 @@ func (s *State) claimTerminalSynthesis(jobID string) (*Job, bool) {
 // ceiling.
 //
 // Blocks until the job's Done channel closes (exit status recorded); intended
-// to run on the pusher goroutine after the stream ends.
-func (s *State) synthesizeTerminalIfMissing(jobID string) {
+// to run on the pusher goroutine after the stream ends. The ring push happens
+// immediately; the webhook copy is enqueued on `queue` when non-nil (the
+// pusher's delivery queue — never blocks) or POSTed directly when nil (the
+// failJob path, where no pusher exists).
+func (s *State) synthesizeTerminalIfMissing(jobID string, queue chan<- []byte) {
 	s.Mu.RLock()
 	job, ok := s.Jobs[jobID]
 	s.Mu.RUnlock()
@@ -225,7 +234,16 @@ func (s *State) synthesizeTerminalIfMissing(jobID string) {
 	if job.Events != nil {
 		job.Events.Push(payload)
 	}
-	s.deliverEvent(jobID, payload)
+	if queue != nil {
+		select {
+		case queue <- payload:
+		default:
+			s.WebhookDrops.Add(1)
+			log.Printf("[event-pusher] job %s: delivery queue full; dropping synthetic terminal from webhook path", jobID)
+		}
+	} else {
+		s.deliverEvent(jobID, payload)
+	}
 }
 
 // deliverEvent POSTs one event to the platform webhook with bounded retries.
