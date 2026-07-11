@@ -191,10 +191,17 @@ func (s *State) synthesizeTerminalIfMissing(jobID string) {
 
 	var evType string
 	switch status {
-	case JobStatusDone:
-		evType = "agent.done"
 	case JobStatusCancelled:
 		evType = "agent.cancelled"
+	case JobStatusDone:
+		// A clean exit (0) is ambiguous: the runner exits 0 for agent.done AND
+		// agent.out_of_turns, and the whole reason we're synthesizing is that
+		// the real terminal line was lost. Synthesizing agent.done here could
+		// declare success on incomplete (out-of-turns) work and let the
+		// platform commit/finalize it. Fail conservatively instead: a false
+		// failure costs a retry; a false success ships incomplete work.
+		evType = "agent.error"
+		errMsg = "runner exited cleanly but its terminal event was lost; failing conservatively (a lost agent.out_of_turns is indistinguishable from a lost agent.done)"
 	default:
 		evType = "agent.error"
 		if errMsg == "" {
@@ -208,8 +215,6 @@ func (s *State) synthesizeTerminalIfMissing(jobID string) {
 	}
 	if evType == "agent.error" {
 		synthetic["error"] = errMsg
-	} else if evType == "agent.done" {
-		synthetic["finalText"] = "(terminal event synthesized by sandbox supervisor: runner exited cleanly but its agent.done event was lost in transit)"
 	}
 	payload, err := json.Marshal(synthetic)
 	if err != nil {
