@@ -44,10 +44,19 @@ type Job struct {
 	Result    *sdk.CallToolResult
 	Error     *string
 	CreatedAt time.Time
-	Done      chan struct{}
-	cancel    context.CancelFunc
-	Cmd       *exec.Cmd
-	Events    *EventRing
+	// CompletedAt is set when the job reaches a non-running status. Eviction
+	// keys off it (INC-2303): keying off CreatedAt evicted long-running jobs
+	// within one tick of finishing, leaving the platform's 30s poll loop a
+	// ~1-minute window to observe the terminal event before a 404.
+	CompletedAt time.Time
+	Done        chan struct{}
+	cancel      context.CancelFunc
+	Cmd         *exec.Cmd
+	Events      *EventRing
+	// TerminalEventSeen records that a terminal agent event traversed the
+	// event pusher (or was synthesized). Guarded by State.Mu. See
+	// synthesizeTerminalIfMissing (INC-2303).
+	TerminalEventSeen bool
 }
 
 // StartJob creates a Job for the named tool, adds it to s.Jobs, and spawns a
@@ -106,6 +115,7 @@ func (s *State) StartJob(toolName string, args map[string]interface{}) string {
 			job.Result = result
 			job.Status = JobStatusDone
 		}
+		job.CompletedAt = time.Now()
 		close(job.Done)
 	}()
 
@@ -133,13 +143,22 @@ func (s *State) GetJob(id string) *JobSnapshot {
 	}
 }
 
-// evictOldJobs removes completed/failed jobs older than jobEvictAfter.
+// evictOldJobs removes completed/failed jobs that finished more than
+// jobEvictAfter ago. Falls back to CreatedAt when CompletedAt was never set
+// (defensive; every status-flip site sets it).
 func (s *State) evictOldJobs() {
 	cutoff := time.Now().Add(-jobEvictAfter)
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 	for id, job := range s.Jobs {
-		if job.Status != JobStatusRunning && job.CreatedAt.Before(cutoff) {
+		if job.Status == JobStatusRunning {
+			continue
+		}
+		ref := job.CompletedAt
+		if ref.IsZero() {
+			ref = job.CreatedAt
+		}
+		if ref.Before(cutoff) {
 			delete(s.Jobs, id)
 		}
 	}

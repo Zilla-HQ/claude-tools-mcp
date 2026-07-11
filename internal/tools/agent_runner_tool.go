@@ -156,6 +156,9 @@ func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
 			job.Status = JobStatusDone
 			log.Printf("[agent-runner] job %s: runner exited cleanly", job.ID)
 		}
+		if job.CompletedAt.IsZero() {
+			job.CompletedAt = time.Now()
+		}
 		select {
 		case <-job.Done:
 		default:
@@ -167,14 +170,25 @@ func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
 func (s *State) failJob(job *Job, msg string) {
 	log.Printf("[agent-runner] job %s: FAILED — %s", job.ID, msg)
 	s.Mu.Lock()
-	defer s.Mu.Unlock()
 	job.Status = JobStatusFailed
 	job.Error = &msg
+	if job.CompletedAt.IsZero() {
+		job.CompletedAt = time.Now()
+	}
 	select {
 	case <-job.Done:
 	default:
 		close(job.Done)
 	}
+	s.Mu.Unlock()
+	// Early failures (FIFO/spawn errors) happen before the event pusher exists,
+	// so nothing would ever put a terminal event in the ring — the platform
+	// poll loop would read "running" until eviction. Synthesize one (INC-2303).
+	// No-op when the pusher is running and already saw (or will see) a real
+	// terminal event: claimTerminalSynthesis is atomic and Done is closed.
+	// Async because failJob can run on the HTTP request path and delivery
+	// retries are slow.
+	go s.synthesizeTerminalIfMissing(job.ID)
 }
 
 // CancelAgentJob sends SIGTERM to the job's process group, waits up to 5s, then
@@ -189,19 +203,21 @@ func (s *State) CancelAgentJob(jobID string) {
 
 	s.Mu.Lock()
 	job.Status = JobStatusCancelled
+	cmd := job.Cmd
 	s.Mu.Unlock()
 
-	s.Mu.RLock()
-	cmd := job.Cmd
-	s.Mu.RUnlock()
-
 	if cmd == nil || cmd.Process == nil {
-		// No subprocess — just close Done channel if not already done.
+		// No subprocess — record completion and close Done if not already done.
+		s.Mu.Lock()
+		if job.CompletedAt.IsZero() {
+			job.CompletedAt = time.Now()
+		}
 		select {
 		case <-job.Done:
 		default:
 			close(job.Done)
 		}
+		s.Mu.Unlock()
 		return
 	}
 
