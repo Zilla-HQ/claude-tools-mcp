@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -57,6 +58,10 @@ type Job struct {
 	// event pusher (or was synthesized). Guarded by State.Mu. See
 	// synthesizeTerminalIfMissing (INC-2303).
 	TerminalEventSeen bool
+	// EventCount counts FIFO lines the pusher has processed for this job. A
+	// synthetic terminal uses EventCount+1 as its `seq` so it validates against
+	// the platform's agentEventSchema and sorts after every real event.
+	EventCount atomic.Int64
 }
 
 // StartJob creates a Job for the named tool, adds it to s.Jobs, and spawns a
