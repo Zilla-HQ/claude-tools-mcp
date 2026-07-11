@@ -99,8 +99,11 @@ func (s *State) startEventPusher(jobID string, fifoReader *os.File) {
 			s.Mu.RLock()
 			job, ok := s.Jobs[jobID]
 			s.Mu.RUnlock()
-			if ok && job.Events != nil {
-				job.Events.Push(event)
+			if ok {
+				job.EventCount.Add(1)
+				if job.Events != nil {
+					job.Events.Push(event)
+				}
 			}
 			if isTerminalEvent(event) {
 				s.markTerminalEventSeen(jobID)
@@ -218,9 +221,17 @@ func (s *State) synthesizeTerminalIfMissing(jobID string, queue chan<- []byte) {
 		}
 	}
 
+	// Carry the base-event fields the platform's agentEventSchema requires
+	// (seq/spanId/ts — see packages/agent-runner/src/types.ts); without them
+	// handleSandboxEvent rejects the webhook copy as "Invalid event body" and
+	// only the slower ring-poll path would see the synthetic. seq sorts after
+	// every real event; ts matches the runner's Date.now() epoch-millis form.
 	synthetic := map[string]any{
 		"type":      evType,
 		"synthetic": true,
+		"seq":       job.EventCount.Add(1),
+		"spanId":    "synthetic-terminal",
+		"ts":        time.Now().UnixMilli(),
 	}
 	if evType == "agent.error" {
 		synthetic["error"] = errMsg

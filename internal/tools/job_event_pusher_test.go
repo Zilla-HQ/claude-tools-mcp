@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -241,6 +242,14 @@ func TestSynthesizesTerminalWhenRunnerExitsSilently(t *testing.T) {
 	})
 	last, _ := lastBody.Load().(string)
 	assert.Contains(t, last, "signal: killed")
+	// The platform's agentEventSchema requires seq/spanId/ts on every event —
+	// without them the webhook copy is rejected as "Invalid event body".
+	var synthetic map[string]any
+	require.NoError(t, json.Unmarshal([]byte(last), &synthetic))
+	assert.Equal(t, float64(2), synthetic["seq"], "seq must sort after the one real event")
+	assert.Equal(t, "synthetic-terminal", synthetic["spanId"])
+	assert.IsType(t, float64(0), synthetic["ts"], "ts must be a number (epoch millis)")
+	assert.Greater(t, synthetic["ts"].(float64), float64(1_700_000_000_000))
 }
 
 // Synthesis must run BEFORE the delivery queue drains (Codex P1 on the second
