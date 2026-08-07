@@ -20,25 +20,52 @@ var DevRunAgentTool = sdk.Tool{
 	Description: "Spawn the agent-runner process for a given working directory. Returns a jobId.",
 }
 
+// AgentSkill is a single named skill's content, handed to the runner so
+// skill_read can be a synchronous in-memory lookup — no network call, no
+// fail-open mid-turn risk. Mirrors the {name, description, content} shape
+// the platform's platform-loop skill loader already returns.
+type AgentSkill struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Content     string `json:"content"`
+}
+
 type DevRunAgentInput struct {
-	WorkDir       string `json:"workDir"`
-	SystemPrompt  string `json:"systemPrompt"`
-	UserPrompt    string `json:"userPrompt"`
-	Provider      string `json:"provider"`
-	ModelId       string `json:"modelId"`
-	MaxIterations *int   `json:"maxIterations,omitempty"`
+	WorkDir       string       `json:"workDir"`
+	SystemPrompt  string       `json:"systemPrompt"`
+	UserPrompt    string       `json:"userPrompt"`
+	Provider      string       `json:"provider"`
+	ModelId       string       `json:"modelId"`
+	MaxIterations *int         `json:"maxIterations,omitempty"`
+	// Reasoning is the thinking-level pin for reasoning-roster models
+	// (kimi/glm) — computed platform-side, threaded into the LLM call so the
+	// sandbox loop thinks like the platform loop. Previously silently
+	// dropped here even though both the platform and agent-runner already
+	// declared it, since this struct never had a field to carry it.
+	Reasoning *string `json:"reasoning,omitempty"`
+	// MaxTokens is the turn-budget floor that rides with Reasoning so hidden
+	// reasoning tokens don't truncate the answer. Same prior silent-drop bug
+	// as Reasoning.
+	MaxTokens *int `json:"maxTokens,omitempty"`
+	// Skills are bundled once per dispatch so skill_read is a synchronous
+	// lookup inside the runner rather than a network fetch back to the
+	// platform — no transient-failure mode, no image/deploy dependency.
+	Skills []AgentSkill `json:"skills,omitempty"`
 }
 
 // agentRunnerSpec is the JSON blob written to the runner subprocess's stdin.
 type agentRunnerSpec struct {
-	JobId         string `json:"jobId"`
-	FifoPath      string `json:"fifoPath"`
-	WorkDir       string `json:"workDir"`
-	SystemPrompt  string `json:"systemPrompt"`
-	UserPrompt    string `json:"userPrompt"`
-	Provider      string `json:"provider"`
-	ModelId       string `json:"modelId"`
-	MaxIterations *int   `json:"maxIterations,omitempty"`
+	JobId         string       `json:"jobId"`
+	FifoPath      string       `json:"fifoPath"`
+	WorkDir       string       `json:"workDir"`
+	SystemPrompt  string       `json:"systemPrompt"`
+	UserPrompt    string       `json:"userPrompt"`
+	Provider      string       `json:"provider"`
+	ModelId       string       `json:"modelId"`
+	MaxIterations *int         `json:"maxIterations,omitempty"`
+	Reasoning     *string      `json:"reasoning,omitempty"`
+	MaxTokens     *int         `json:"maxTokens,omitempty"`
+	Skills        []AgentSkill `json:"skills,omitempty"`
 }
 
 func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
@@ -106,6 +133,9 @@ func (s *State) runAgentJob(job *Job, input DevRunAgentInput) {
 		Provider:      input.Provider,
 		ModelId:       input.ModelId,
 		MaxIterations: input.MaxIterations,
+		Reasoning:     input.Reasoning,
+		MaxTokens:     input.MaxTokens,
+		Skills:        input.Skills,
 	}
 	specJSON, err := json.Marshal(spec)
 	if err != nil {
@@ -275,6 +305,19 @@ func DevRunAgent(ctx context.Context, req *sdk.CallToolRequest, args DevRunAgent
 	}
 	if args.MaxIterations != nil {
 		argsMap["maxIterations"] = *args.MaxIterations
+	}
+	if args.Reasoning != nil {
+		argsMap["reasoning"] = *args.Reasoning
+	}
+	if args.MaxTokens != nil {
+		argsMap["maxTokens"] = *args.MaxTokens
+	}
+	if len(args.Skills) > 0 {
+		skillNames := make([]string, len(args.Skills))
+		for i, sk := range args.Skills {
+			skillNames[i] = sk.Name
+		}
+		argsMap["skills"] = skillNames
 	}
 	jobID := state.StartJob("dev_run_agent", argsMap)
 	return &sdk.CallToolResult{
